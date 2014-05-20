@@ -189,10 +189,18 @@ object SimpleSomaticVariantCaller extends Command {
    */
   def buildPileups(reads: RDD[SimpleRead],
                    minBaseQuality: Int = 0,
-                   minDepth: Int = 0): RDD[(Locus, Pileup)] = {
-    val baseReadsAtPos: RDD[(Locus, BaseRead)] = reads.flatMap(expandBaseReads _)
+                   minDepth: Int = 0,
+                   partitioner : Option[Partitioner] = None): RDD[(Locus, Pileup)] = {
+    var baseReadsAtPos: RDD[(Locus, BaseRead)] = reads.flatMap(expandBaseReads _)
+    Common.progress("-- Expanded base reads")
+    if (partitioner.isDefined) {
+      baseReadsAtPos = baseReadsAtPos.partitionBy(partitioner.get)
+      Common.progress("-- Repartitioned")
+    }
     val filteredBaseReads = baseReadsAtPos.filter(_._2.readQuality.getOrElse(minBaseQuality) >= minBaseQuality)
+    Common.progress("-- Filtered by base quality")
     val pileups = filteredBaseReads.groupByKey()
+    Common.progress("-- Grouped pileups at loci")
     pileups.filter(_._2.length >= minDepth)
   }
 
@@ -334,21 +342,17 @@ object SimpleSomaticVariantCaller extends Command {
         nonNegativeMod(contig.hashCode + pos.toInt / 10000, numPartitions)
       }
     }
-    Common.progress("Entered callVariants")
-    var normalPileups: RDD[(Locus, Pileup)] =
-      buildPileups(normalReads, minBaseQuality, minNormalCoverage)
-
-    val n: Int = Math.min(5000, Math.max((normalPileups.count / 1000).toInt, 1))
+    val n: Int = Math.min(8000, Math.max((normalReads.count / 1000).toInt, 1))
     val locusPartitioner = new LocusPartitioner(n)
 
+    Common.progress("Entered callVariants")
+    var normalPileups: RDD[(Locus, Pileup)] =
+      buildPileups(normalReads, minBaseQuality, minNormalCoverage, Some(locusPartitioner))
     Common.progress("built normal pileups")
-    normalPileups = normalPileups.partitionBy(locusPartitioner)
-    Common.progress("repartitioned normal pileups")
+
     var tumorPileups: RDD[(Locus, Pileup)] =
-      buildPileups(tumorReads, minBaseQuality, minNormalCoverage).partitionBy(locusPartitioner)
+      buildPileups(tumorReads, minBaseQuality, minNormalCoverage, Some(locusPartitioner))
     Common.progress("built tumor pileups")
-    tumorPileups = tumorPileups.partitionBy(locusPartitioner)
-    Common.progress("repartitioned tumor pileups")
     val joinedPileups: RDD[(Locus, (Pileup, Pileup))] = normalPileups.join(tumorPileups)
     Common.progress("joined tumor+normal pileups")
     val pileupsWithRef: RDD[(Locus, ((Pileup, Pileup), Byte))] = joinedPileups.join(reference)
