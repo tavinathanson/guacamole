@@ -28,9 +28,10 @@ import org.apache.spark.SparkContext.rddToPairRDDFunctions
 import scala.collection.{ mutable, JavaConversions }
 import org.bdgenomics.adam.rdd.ADAMContext._
 import net.sf.samtools.{ CigarOperator }
-import org.apache.spark.SparkContext
+import org.apache.spark.{ Partitioner, SparkContext }
 import org.apache.hadoop.io.{ Text, LongWritable }
 import org.apache.hadoop.mapred.TextInputFormat
+import org.apache.spark.util.Utils
 
 /**
  * Simple somatic variant caller implementation.
@@ -320,13 +321,34 @@ object SimpleSomaticVariantCaller extends Command {
                    minNormalCoverage: Int = 10,
                    minTumorCoverage: Int = 10): RDD[ADAMGenotype] = {
 
+    class LocusPartitioner(n: Int) extends Partitioner {
+      def nonNegativeMod(x: Int, mod: Int): Int = {
+        val rawMod = x % mod
+        rawMod + (if (rawMod < 0) mod else 0)
+      }
+
+      def numPartitions = n
+
+      def getPartition(key: Any): Int = {
+        val (contig, pos) = key.asInstanceOf[Locus]
+        nonNegativeMod(contig.hashCode + pos.toInt / 10000, numPartitions)
+      }
+    }
     Common.progress("Entered callVariants")
-    val normalPileups: RDD[(Locus, Pileup)] =
+    var normalPileups: RDD[(Locus, Pileup)] =
       buildPileups(normalReads, minBaseQuality, minNormalCoverage)
+
+    val n: Int = Math.min(5000, Math.max((normalPileups.count / 1000).toInt, 1))
+    val locusPartitioner = new LocusPartitioner(n)
+
     Common.progress("built normal pileups")
-    val tumorPileups: RDD[(Locus, Pileup)] =
-      buildPileups(tumorReads, minBaseQuality, minNormalCoverage)
+    normalPileups = normalPileups.partitionBy(locusPartitioner)
+    Common.progress("repartitioned normal pileups")
+    var tumorPileups: RDD[(Locus, Pileup)] =
+      buildPileups(tumorReads, minBaseQuality, minNormalCoverage).partitionBy(locusPartitioner)
     Common.progress("built tumor pileups")
+    tumorPileups = tumorPileups.partitionBy(locusPartitioner)
+    Common.progress("repartitioned tumor pileups")
     val joinedPileups: RDD[(Locus, (Pileup, Pileup))] = normalPileups.join(tumorPileups)
     Common.progress("joined tumor+normal pileups")
     val pileupsWithRef: RDD[(Locus, ((Pileup, Pileup), Byte))] = joinedPileups.join(reference)
