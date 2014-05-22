@@ -51,27 +51,33 @@ object Benchmarks extends Command {
 
     var sequences: RDD[String] = if (args.reads.endsWith("sam")) {
       // copied from textFile
-      var byteOffsets =
-        sc.hadoopFile[LongWritable, Text, TextInputFormat](args.reads)
+      var byteOffsets: RDD[(Long, Text)] =
+        sc.hadoopFile[LongWritable, Text, TextInputFormat](args.reads).map(x => (x._1.get, x._2))
 
-      if (args.sortByteOffsets) { byteOffsets = byteOffsets.sortByKey() }
+      if (args.sortByteOffsets) {
+        byteOffsets = byteOffsets.sortByKey()
+        val firstVal = byteOffsets.first
+        Common.progress("Sorted byte offsets (%d partitions, %s)".format(byteOffsets.partitions.length, byteOffsets.getClass))
+      }
       var reads: RDD[String] = byteOffsets.map(_._2.toString)
 
       Common.progress(
-        "Loaded text file (%d partitions, class %s)".format(reads.partitions.length, reads.getClass))
+        "Loaded text file (%d partitions, %s)".format(reads.partitions.length, reads.getClass))
 
       if (args.sortRecords) {
         val pairs: RDD[(String, Int)] = reads.map(s => (s, 0))
         reads = pairs.sortByKey().keys
+        val firstVal = reads.first
         Common.progress(
-          "sorted strings (%d partitions, class %s)".format(reads.partitions, reads.getClass))
+          "Sorted strings (%d partitions, %s)".format(reads.partitions.length, reads.getClass))
       }
 
       if (args.sortHashCodes) {
         val hashCodes: RDD[(Int, String)] = reads.keyBy(_.hashCode)
         reads = hashCodes.sortByKey().values
+        val firstVal = reads.first
         Common.progress(
-          "sorted strings (%d partitions, class %s)".format(reads.partitions, reads.getClass))
+          "sorted strings (%d partitions, %s)".format(reads.partitions, reads.getClass))
       }
       reads.filter(!_.startsWith("@")).map(_.split("\t")(9))
     } else if (args.reads.endsWith("bam")) {
