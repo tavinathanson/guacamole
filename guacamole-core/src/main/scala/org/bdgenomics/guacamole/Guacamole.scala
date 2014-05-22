@@ -22,7 +22,7 @@ import org.apache.spark.Logging
 import java.util.logging.Level
 import org.bdgenomics.guacamole.callers.{ BayesianQualityVariantCaller, ThresholdVariantCaller }
 import org.bdgenomics.guacamole.somatic.SimpleSomaticVariantCaller
-import org.bdgenomics.guacamole.perf.NucleotideCount
+import org.bdgenomics.guacamole.perf.Benchmarks
 import org.bdgenomics.adam.util.ParquetLogger
 import org.bdgenomics.guacamole.Common.progress
 import scala.Some
@@ -40,7 +40,7 @@ object Guacamole extends Logging {
     ThresholdVariantCaller,
     SimpleSomaticVariantCaller,
     BayesianQualityVariantCaller,
-    NucleotideCount)
+    Benchmarks)
 
   private def printUsage() = {
     println("Usage: java ... <command> [other args]\n")
