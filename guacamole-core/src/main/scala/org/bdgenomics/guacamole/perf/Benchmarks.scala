@@ -10,8 +10,8 @@ import org.bdgenomics.guacamole.Command
 import org.bdgenomics.guacamole.Common.Arguments.{ Reads, Base }
 import org.kohsuke.args4j.Option
 import net.sf.samtools.SAMRecord
-import org.apache.hadoop.io.{Text, LongWritable}
-import fi.tkk.ics.hadoop.bam.{AnySAMInputFormat, SAMRecordWritable}
+import org.apache.hadoop.io.{ Text, LongWritable }
+import fi.tkk.ics.hadoop.bam.{ AnySAMInputFormat, SAMRecordWritable }
 import org.bdgenomics.adam.avro.ADAMRecord
 import org.apache.hadoop.mapred.TextInputFormat
 
@@ -21,36 +21,38 @@ object Benchmarks extends Command {
 
   private class Arguments extends Reads {
 
-
     @Option(name = "-sort-byte-offsets", usage = "Sort byte offsets of input records")
-    var sortByteOffsets : Boolean = false
-
+    var sortByteOffsets: Boolean = false
 
     @Option(name = "-sort-records", usage = "Sort SAM entries before extracting nucleotides")
-    var sortRecords : Boolean = false
+    var sortRecords: Boolean = false
 
     @Option(name = "-sort-hash-codes", usage = "Sort SAM entries by hash codes")
-    var sortHashCodes : Boolean = false
+    var sortHashCodes: Boolean = false
 
     @Option(name = "-sort-nucleotides", usage = "Sort nucleotides before counting")
-    var sortChars : Boolean = false
+    var sortChars: Boolean = false
 
     @Option(name = "-count", usage = "Use countByKey instead of sortByKey")
-    var count : Boolean = false
+    var count: Boolean = false
+
+    @Option(name = "-parallelism", usage = "Parallelism level to use instead of sc.defaultParallelism")
+    var parallelism: Int = 0
   }
 
   override def run(rawArgs: Array[String]): Unit = {
     val args = Args4j[Arguments](rawArgs)
     val sc: SparkContext = Common.createSparkContext(args)
+
     Common.progress("Created Spark context")
-    println("Configuration: %s".format(sc.getConf))
+    println("Configuration: %s".format(sc.getConf.toDebugString))
     println("Default parallelism: %d".format(sc.defaultParallelism))
+    println("Default min splits: %d".format(sc.defaultMinSplits))
 
-
-    var sequences: RDD[String] = if(args.reads.endsWith("sam")) {
+    var sequences: RDD[String] = if (args.reads.endsWith("sam")) {
       // copied from textFile
-      var byteOffsets  =
-        sc.hadoopFile[LongWritable, Text, TextInputFormat](args.reads, sc.defaultMinSplits)
+      var byteOffsets =
+        sc.hadoopFile[LongWritable, Text, TextInputFormat](args.reads)
 
       if (args.sortByteOffsets) { byteOffsets = byteOffsets.sortByKey() }
       var reads: RDD[String] = byteOffsets.map(_._2.toString)
@@ -73,7 +75,7 @@ object Benchmarks extends Command {
       }
       reads.filter(!_.startsWith("@")).map(_.split("\t")(9))
     } else if (args.reads.endsWith("bam")) {
-      var byteOffsets : RDD[(LongWritable, SAMRecordWritable)] =
+      var byteOffsets: RDD[(LongWritable, SAMRecordWritable)] =
         sc.newAPIHadoopFile[LongWritable, SAMRecordWritable, AnySAMInputFormat](args.reads)
       if (args.sortByteOffsets) { byteOffsets = byteOffsets.sortByKey() }
       var records = byteOffsets.map(_._2.get)
@@ -85,7 +87,7 @@ object Benchmarks extends Command {
       }
       byteOffsets.map({ case (k, v) => v.get.getReadString })
     } else {
-      var adamRecords : RDD[ADAMRecord] = sc.adamLoad(args.reads)
+      var adamRecords: RDD[ADAMRecord] = sc.adamLoad(args.reads)
       if (args.sortRecords) {
         adamRecords = adamRecords.keyBy(_.toString).sortByKey().values
       }
