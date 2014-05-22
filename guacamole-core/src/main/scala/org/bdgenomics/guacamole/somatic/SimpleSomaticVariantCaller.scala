@@ -191,8 +191,7 @@ object SimpleSomaticVariantCaller extends Command {
   def buildPileups(reads: RDD[SimpleRead],
                    minBaseQuality: Int = 0,
                    minDepth: Int = 0,
-                   partitioner : Option[Partitioner] = None): RDD[(Locus, Pileup)] = {
-
+                   partitioner: Option[Partitioner] = None): RDD[(Locus, Pileup)] = {
 
     var baseReadsAtPos: RDD[(Locus, BaseRead)] = reads.flatMap(expandBaseReads _)
     Common.progress("-- Expanded base reads")
@@ -332,7 +331,6 @@ object SimpleSomaticVariantCaller extends Command {
                    minNormalCoverage: Int = 10,
                    minTumorCoverage: Int = 10): RDD[ADAMGenotype] = {
 
-
     class LocusPartitioner(n: Int) extends Partitioner {
       def nonNegativeMod(x: Int, mod: Int): Int = {
         val rawMod = x % mod
@@ -348,7 +346,6 @@ object SimpleSomaticVariantCaller extends Command {
     }
     val n: Int = Math.min(8000, Math.max((normalReads.count / 1000).toInt, 1))
     val locusPartitioner = new LocusPartitioner(n)
-
 
     Common.progress("Entered callVariants")
     var normalPileups: RDD[(Locus, Pileup)] =
