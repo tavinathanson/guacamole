@@ -14,8 +14,11 @@ object NucleotideCount extends Command {
   override val description = "Benchmark for counting nucleotides in a SAM file"
 
   private class Arguments extends Reads {
-    @Option(name = "-globalCount", usage = "Reduce entire RDD")
-    var globalCount : Boolean = true
+    @Option(name = "-count", usage = "Reduce RDD using countByKey instead of reduceByKey")
+    var globalCount : Boolean = false
+
+    @Option(name = "-sort", usage = "Sort before counting")
+    var sort : Boolean = false
   }
 
   override def run(rawArgs: Array[String]): Unit = {
@@ -24,14 +27,20 @@ object NucleotideCount extends Command {
     Common.progress("Created Spark context")
     var reads: RDD[String] = sc.textFile(args.reads)
     Common.progress("Loaded text file")
-    val sequences: RDD[String] = reads.filter(!_.startsWith("@")).map(_.split("\t")(9))
+    var sequences: RDD[String] = reads.filter(!_.startsWith("@")).map(_.split("\t")(9))
     Common.progress("Extracted read sequences")
-    val localCounts: RDD[(Char, Long)] = sequences.flatMap(seq => seq.map(c => (c, 1L)))
+    var localCounts: RDD[(Char, Long)] = sequences.flatMap(seq => seq.map(c => (c, 1L)))
     Common.progress("flatMap")
+    if (args.sort) {
+      localCounts = localCounts.sortByKey()
+      Common.progress("sort")
+    }
     val counts: Array[(Char, Long)] = if (args.globalCount) {
-      localCounts.reduceByKey(_ + _).collect
-    } else {
+      println("-- countByKey")
       localCounts.countByKey().toArray
+    } else {
+      println("-- reduceByKey")
+      localCounts.reduceByKey(_ + _).collect
     }
     Common.progress("global reduce")
     for ((c, i) <- counts) {
