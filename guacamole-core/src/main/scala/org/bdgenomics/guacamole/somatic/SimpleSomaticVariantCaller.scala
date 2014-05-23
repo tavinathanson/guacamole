@@ -320,11 +320,17 @@ object SimpleSomaticVariantCaller extends Command {
                    minTumorCoverage: Int = 10): RDD[ADAMGenotype] = {
 
     Common.progress("Entered callVariants")
-    val normalPileups: RDD[(Locus, Pileup)] =
+    var normalPileups: RDD[(Locus, Pileup)] =
       buildPileups(normalReads, minBaseQuality, minNormalCoverage)
+    if (reference.partitioner.isDefined) {
+      normalPileups = normalPileups.partitionBy(reference.partitioner.get)
+    }
     Common.progress("built normal pileups")
-    val tumorPileups: RDD[(Locus, Pileup)] =
+    var tumorPileups: RDD[(Locus, Pileup)] =
       buildPileups(tumorReads, minBaseQuality, minNormalCoverage)
+    if (reference.partitioner.isDefined) {
+      tumorPileups.partitionBy(reference.partitioner.get)
+    }
     Common.progress("built tumor pileups")
     val joinedPileups: RDD[(Locus, (Pileup, Pileup))] = normalPileups.join(tumorPileups)
     Common.progress("joined tumor+normal pileups")
@@ -349,11 +355,11 @@ object SimpleSomaticVariantCaller extends Command {
    */
 
   def callVariantsFromArgs(sc: SparkContext, args: Arguments): RDD[ADAMGenotype] = {
+
     val normalReads: RDD[SimpleRead] = SimpleRead.loadFile(args.normalReads, sc, true, true)
     val tumorReads: RDD[SimpleRead] = SimpleRead.loadFile(args.tumorReads, sc, true, true)
     val referencePath = args.referenceInput
     val reference = Reference.load(referencePath, sc)
-    Common.progress("Loaded reference genome")
     callVariants(normalReads, tumorReads, reference.bases)
   }
 

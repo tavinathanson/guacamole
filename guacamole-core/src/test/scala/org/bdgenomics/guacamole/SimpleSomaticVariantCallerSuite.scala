@@ -139,10 +139,13 @@ class SimpleSomaticVariantCallerSuite extends TestUtil.SparkFunSuite with Should
     assert(chr1Local.length > 59000, "Expected 59Kb of chromosome 1, got only %d".format(chr1Local.length))
 
     val reference = Reference.load(path, sc)
+    Common.progress("test loaded reference")
     val sortedBases: RDD[(Reference.Locus, Byte)] = reference.bases.sortByKey(ascending = true)
+    Common.progress("test sorted reference")
     val noIndices = sortedBases.map(_._2)
-    val baseArray = noIndices.collect().map(_.toChar)
 
+    val baseArray = noIndices.collect().map(_.toChar)
+    Common.progress("test collected bases")
     assert(baseArray.length == chr1Local.length,
       "Distributed chromosome length %d != local length %d".format(baseArray.length, chr1Local.length))
     val sequence = baseArray.mkString("")
