@@ -53,6 +53,19 @@ object SimpleSomaticVariantCaller extends Command {
     with Common.Arguments.Reference {}
 
   type Locus = (String, Long)
+  class LocusPartitioner(n: Int) extends Partitioner {
+    def nonNegativeMod(x: Int, mod: Int): Int = {
+      val rawMod = x % mod
+      rawMod + (if (rawMod < 0) mod else 0)
+    }
+
+    def numPartitions = n
+
+    def getPartition(key: Any): Int = {
+      val (contig, pos) = key.asInstanceOf[Locus]
+      nonNegativeMod(contig.hashCode + pos.toInt / 10000, numPartitions)
+    }
+  }
 
   /**
    * Instead of building explicit pileups, we're splitting apart the bases into their own
@@ -66,7 +79,7 @@ object SimpleSomaticVariantCaller extends Command {
     readQuality: Option[Int], // don't have read quality for deletions
     alignmentQuality: Int)
 
-  type Pileup = Seq[BaseRead]
+  case class Pileup(bases: Seq[BaseRead])
 
   /**
    *  Create a simple BaseRead object from the CIGAR operator and other information about a read at a
@@ -199,11 +212,13 @@ object SimpleSomaticVariantCaller extends Command {
       baseReadsAtPos = baseReadsAtPos.partitionBy(partitioner.get)
       Common.progress("-- Repartitioned in %d parts".format(partitioner.get.numPartitions))
     }
-    val filteredBaseReads = baseReadsAtPos.filter(_._2.readQuality.getOrElse(minBaseQuality) >= minBaseQuality)
+    val filteredBaseReads = baseReadsAtPos.filter({
+      case (locus, baseRead) => baseRead.readQuality.getOrElse(minBaseQuality) >= minBaseQuality
+    })
     Common.progress("-- Filtered by base quality")
-    val pileups = filteredBaseReads.groupByKey()
+    val pileups = filteredBaseReads.groupByKey().mapValues(bases => Pileup(bases))
     Common.progress("-- Grouped pileups at loci")
-    pileups.filter(_._2.length >= minDepth)
+    pileups.filter({ case (locus, pileup) => pileup.bases.length >= minDepth })
   }
 
   /**
@@ -249,7 +264,7 @@ object SimpleSomaticVariantCaller extends Command {
    */
   def baseCountMap(pileup: Pileup): Map[Option[Byte], Int] = {
     var map = Map[Option[Byte], Int]()
-    for (baseRead <- pileup) {
+    for (baseRead <- pileup.bases) {
       val key: Option[Byte] = baseRead.base
       val oldCount: Int = map.getOrElse(key, 0)
       val newCount: Int = oldCount + 1
@@ -276,7 +291,7 @@ object SimpleSomaticVariantCaller extends Command {
    * @return
    */
   def topBases(pileup: Pileup, percentileRank: Int): Set[Option[Byte]] = {
-    val total = pileup.length
+    val total = pileup.bases.length
     val sortedCounts: List[(Option[Byte], Int)] = baseCounts(pileup)
     val result = mutable.MutableList[Option[Byte]]()
     var cumulative = 0
@@ -331,19 +346,6 @@ object SimpleSomaticVariantCaller extends Command {
                    minNormalCoverage: Int = 10,
                    minTumorCoverage: Int = 10): RDD[ADAMGenotype] = {
 
-    class LocusPartitioner(n: Int) extends Partitioner {
-      def nonNegativeMod(x: Int, mod: Int): Int = {
-        val rawMod = x % mod
-        rawMod + (if (rawMod < 0) mod else 0)
-      }
-
-      def numPartitions = n
-
-      def getPartition(key: Any): Int = {
-        val (contig, pos) = key.asInstanceOf[Locus]
-        nonNegativeMod(contig.hashCode + pos.toInt / 10000, numPartitions)
-      }
-    }
     val n: Int = Math.min(8000, Math.max((normalReads.count / 1000).toInt, 1))
     val locusPartitioner = new LocusPartitioner(n)
 
