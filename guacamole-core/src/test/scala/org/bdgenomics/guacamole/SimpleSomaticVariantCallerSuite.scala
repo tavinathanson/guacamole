@@ -63,7 +63,6 @@ class SimpleSomaticVariantCallerSuite extends TestUtil.SparkFunSuite with Should
 
   sparkTest("No variants when tumor/normal identical") {
     val reads = loadReads("same_start_reads.sam")
-
     val genotypes = SimpleSomaticVariantCaller.callVariants(reads, reads, sc.parallelize(sameStartReferenceBases))
     genotypes.collect.toList should have length (0)
   }

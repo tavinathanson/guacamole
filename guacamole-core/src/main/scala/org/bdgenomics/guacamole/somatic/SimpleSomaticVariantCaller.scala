@@ -28,7 +28,7 @@ import org.apache.spark.SparkContext.rddToPairRDDFunctions
 import scala.collection.{ mutable, JavaConversions }
 import org.bdgenomics.adam.rdd.ADAMContext._
 import net.sf.samtools.{ CigarOperator }
-import org.apache.spark.SparkContext
+import org.apache.spark.{Partitioner, SparkContext}
 import org.apache.hadoop.io.{ Text, LongWritable }
 import org.apache.hadoop.mapred.TextInputFormat
 import org.bdgenomics.guacamole.somatic.Reference.Locus
@@ -314,27 +314,35 @@ object SimpleSomaticVariantCaller extends Command {
    */
   def callVariants(normalReads: RDD[SimpleRead],
                    tumorReads: RDD[SimpleRead],
-                   reference: RDD[(Locus, Byte)],
+                   reference: RDD[(Locus,Byte)],
                    minBaseQuality: Int = 20,
                    minNormalCoverage: Int = 10,
-                   minTumorCoverage: Int = 10): RDD[ADAMGenotype] = {
+                   minTumorCoverage: Int = 10,
+                   partitioner : Option[Partitioner] = None): RDD[ADAMGenotype] = {
 
     Common.progress("Entered callVariants")
     var normalPileups: RDD[(Locus, Pileup)] =
       buildPileups(normalReads, minBaseQuality, minNormalCoverage)
-    if (reference.partitioner.isDefined) {
-      normalPileups = normalPileups.partitionBy(reference.partitioner.get)
-    }
     Common.progress("built normal pileups")
     var tumorPileups: RDD[(Locus, Pileup)] =
       buildPileups(tumorReads, minBaseQuality, minNormalCoverage)
-    if (reference.partitioner.isDefined) {
-      tumorPileups.partitionBy(reference.partitioner.get)
-    }
     Common.progress("built tumor pileups")
+
+
+    val referenceBases = partitioner match {
+      case None => reference
+      case Some(locusPartitioner) =>
+        tumorPileups = tumorPileups.partitionBy(locusPartitioner)
+        Common.progress("Repartitioned tumor pileups")
+        normalPileups = normalPileups.partitionBy(locusPartitioner)
+        Common.progress("Repartitioned normal pileups")
+        val refBases = reference.partitionBy(locusPartitioner)
+        Common.progress("Repartitioned reference")
+        refBases
+    }
     val joinedPileups: RDD[(Locus, (Pileup, Pileup))] = normalPileups.join(tumorPileups)
     Common.progress("joined tumor+normal pileups")
-    val pileupsWithRef: RDD[(Locus, ((Pileup, Pileup), Byte))] = joinedPileups.join(reference)
+    val pileupsWithRef: RDD[(Locus, ((Pileup, Pileup), Byte))] = joinedPileups.join(referenceBases)
     Common.progress("joined tumor+normal against reference genome")
     val genotypes = pileupsWithRef.flatMap({
       case (locus, ((normalPileup, tumorPileup), ref)) =>
@@ -360,7 +368,9 @@ object SimpleSomaticVariantCaller extends Command {
     val tumorReads: RDD[SimpleRead] = SimpleRead.loadFile(args.tumorReads, sc, true, true)
     val referencePath = args.referenceInput
     val reference = Reference.load(referencePath, sc)
-    callVariants(normalReads, tumorReads, reference.bases)
+    val numPartitions : Int = Math.min(1200, (reference.numLoci / 10000L + 1).toInt)
+    val locusPartitioner: Partitioner = new Reference.LocusPartitioner(numPartitions, reference.contigRanges)
+    callVariants(normalReads, tumorReads, reference.bases, partitioner = Some(locusPartitioner))
   }
 
   override def run(rawArgs: Array[String]): Unit = {

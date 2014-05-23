@@ -13,13 +13,14 @@ import com.esotericsoftware.kryo.{ KryoSerializable, Kryo, Serializer }
 import com.esotericsoftware.kryo.io.{ Input, Output }
 
 case class Reference(bases: RDD[(Reference.Locus, Byte)],
-                     contigRanges: Map[String, (Long, Long)]) {}
+                     contigRanges: Map[String, (Long, Long)],
+                     numLoci : Long) {}
 
 object Reference {
 
   type Locus = (String, Long)
 
-  case class LocusPartitioner(n: Int, contigRanges: mutable.Map[String, (Long, Long)]) extends Partitioner {
+  case class LocusPartitioner(n: Int, contigRanges: Map[String, (Long, Long)]) extends Partitioner {
 
     // identity map on the end because serialization in Scala sucks
     val contigSizes = contigRanges.mapValues({ case (start, stop) => (stop - start) }).map(x => x)
@@ -32,9 +33,7 @@ object Reference {
         (newTotal, newMap)
     }
 
-    def numPartitions =
-      // in case n is too large
-      Math.min(n, (totalNumLoci / 10000 + 1).toInt)
+    def numPartitions = n
 
     val lociPerPartition: Long = totalNumLoci / numPartitions.toLong
 
@@ -47,6 +46,7 @@ object Reference {
     }
   }
 
+  /*
   class LocusPartitionerSerializer extends Serializer[LocusPartitioner] {
 
     def write(kryo: Kryo, output: Output, part: LocusPartitioner) {
@@ -69,9 +69,9 @@ object Reference {
         val stop = input.readLong()
         contigRanges(k) = (start, stop)
       }
-      LocusPartitioner(numPartitions, contigRanges)
+      LocusPartitioner(numPartitions, contigRanges.toMap)
     }
-  }
+  }*/
   /**
    *
    * Since formats/sources differ on whether to call a chromosome "chr1" vs. "1"
@@ -157,14 +157,13 @@ object Reference {
             ((contigName, pos - start - 1), seq)
         })
     })
-    val locusPartitioner: Partitioner = new LocusPartitioner(1000, referenceIndex)
-    val repartitioned = locusLines.partitionBy(locusPartitioner)
-    (repartitioned, referenceIndex.toMap)
+    (locusLines, referenceIndex.toMap)
   }
 
   def load(path: String, sc: SparkContext): Reference = {
     val (referenceLines, referenceIndex) = loadReferenceLines(path, sc)
     val bases = referenceLines.flatMap({ case (locus, bytes) => bytes.map((c: Byte) => (locus, c)) })
-    Reference(bases, referenceIndex)
+    val numLoci : Long = referenceIndex.values.map({case (start, stop) => stop - start}).reduce(_ + _)
+    Reference(bases, referenceIndex, numLoci)
   }
 }
