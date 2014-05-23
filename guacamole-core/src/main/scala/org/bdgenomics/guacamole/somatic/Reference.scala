@@ -6,6 +6,10 @@ import org.apache.spark.SparkContext._
 import org.apache.hadoop.io.{ Text, LongWritable }
 import org.apache.hadoop.mapred.TextInputFormat
 import scala.collection.mutable
+import org.bdgenomics.guacamole.Common
+
+case class Reference(bases: RDD[(Reference.Locus, Byte)],
+                     contigRanges: Map[String, (Long, Long)])
 
 object Reference {
 
@@ -32,7 +36,7 @@ object Reference {
    * @param sc
    * @return
    */
-  def loadReferenceLines(path: String, sc: SparkContext): RDD[(Locus, Array[Byte])] = {
+  def loadReferenceLines(path: String, sc: SparkContext): (RDD[(Locus, Array[Byte])], Map[String, (Long, Long)]) = {
 
     // Hadoop loads a text file into an RDD of lines keyed by byte offsets
     val fastaByteOffsetsAndLines: RDD[(Long, Array[Byte])] =
@@ -44,6 +48,7 @@ object Reference {
     val partitionSizes: Array[Long] = sortedSequences.mapPartitions({
       partition => Seq(partition.length.toLong).iterator
     }).collect()
+    Common.progress("-- collected reference partition sizes")
     val partitionSizesBroadcast = sc.broadcast(partitionSizes)
     val numberedLines: RDD[(Long, Array[Byte])] = sortedSequences.mapPartitionsWithIndex {
       case (partitionIndex: Int, partition: Iterator[(Long, Array[Byte])]) =>
@@ -52,7 +57,6 @@ object Reference {
           case ((_, bytes), i) => (i.toLong + offset, bytes)
         }).toIterator
     }
-    assert(numberedLines.count == numLines)
 
     //collect all the lines which start with '>'
     val referenceDescriptionLines: List[(Long, String)] =
@@ -63,7 +67,7 @@ object Reference {
         case (lineNumber, bytes) =>
           (lineNumber, bytes.map(_.toChar).mkString)
       }).toList
-
+    Common.progress("-- collected contig headers")
     //parse the contig description to just pull out the contig name
     val referenceContigNames: List[(Long, String)] =
       referenceDescriptionLines.map({
@@ -80,12 +84,14 @@ object Reference {
       val stop = if (stopCandidates.length > 0) stopCandidates.min else numLines
       referenceIndex(contigName) = (start, stop)
     }
+    val immutableReferenceIndex = referenceIndex.toMap
     // hand-waiving around performance of closure objects by broadcasting
     // every collection that should be shared by multiple workers
-    val referenceIndexBroadcast = sc.broadcast(referenceIndex.toMap)
+    val referenceIndexBroadcast = sc.broadcast(immutableReferenceIndex.toMap)
+    Common.progress("-- broadcast reference index")
 
     // associate each line with whichever contig contains it
-    numberedLines.flatMap({
+    val locusLines = numberedLines.flatMap({
       case (pos, seq) =>
         referenceIndexBroadcast.value.find({
           case (_, (start, stop)) =>
@@ -95,10 +101,12 @@ object Reference {
             ((contigName, pos - start - 1), seq)
         })
     })
+    (locusLines, immutableReferenceIndex)
   }
 
-  def loadReference(path: String, sc: SparkContext): RDD[(Locus, Byte)] = {
-    val referenceLines: RDD[(Locus, Array[Byte])] = loadReferenceLines(path, sc)
-    referenceLines.flatMap({ case (locus, bytes) => bytes.map((c: Byte) => (locus, c)) })
+  def load(path: String, sc: SparkContext): Reference = {
+    val (referenceLines, referenceIndex) = loadReferenceLines(path, sc)
+    val bases = referenceLines.flatMap({ case (locus, bytes) => bytes.map((c: Byte) => (locus, c)) })
+    Reference(bases, referenceIndex)
   }
 }

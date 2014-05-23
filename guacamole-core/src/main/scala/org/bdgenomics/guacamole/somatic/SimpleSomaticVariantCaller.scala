@@ -31,6 +31,7 @@ import net.sf.samtools.{ CigarOperator }
 import org.apache.spark.SparkContext
 import org.apache.hadoop.io.{ Text, LongWritable }
 import org.apache.hadoop.mapred.TextInputFormat
+import org.bdgenomics.guacamole.somatic.Reference.Locus
 
 /**
  * Simple somatic variant caller implementation.
@@ -49,8 +50,6 @@ object SimpleSomaticVariantCaller extends Command {
     with OptionalOutput
     with Common.Arguments.TumorNormalReads
     with Common.Arguments.Reference {}
-
-  type Locus = (String, Long)
 
   /**
    * Instead of building explicit pileups, we're splitting apart the bases into their own
@@ -248,7 +247,7 @@ object SimpleSomaticVariantCaller extends Command {
   }
 
   /**
-   * Create a sorted list of Alignments paired with the number of times they occured in a pileup.
+   * Create a sorted list of Alignments paired with the number of times they occurred in a pileup.
    */
   def baseCounts(pileup: Pileup): List[(Option[Byte], Int)] = {
     val map: Map[Option[Byte], Int] = baseCountMap(pileup)
@@ -353,9 +352,9 @@ object SimpleSomaticVariantCaller extends Command {
     val normalReads: RDD[SimpleRead] = SimpleRead.loadFile(args.normalReads, sc, true, true)
     val tumorReads: RDD[SimpleRead] = SimpleRead.loadFile(args.tumorReads, sc, true, true)
     val referencePath = args.referenceInput
-    val reference: RDD[(Locus, Byte)] = Reference.loadReference(referencePath, sc)
+    val reference = Reference.load(referencePath, sc)
     Common.progress("Loaded reference genome")
-    callVariants(normalReads, tumorReads, reference)
+    callVariants(normalReads, tumorReads, reference.bases)
   }
 
   override def run(rawArgs: Array[String]): Unit = {

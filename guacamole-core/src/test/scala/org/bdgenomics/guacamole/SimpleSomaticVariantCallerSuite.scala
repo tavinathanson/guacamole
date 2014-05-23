@@ -138,9 +138,8 @@ class SimpleSomaticVariantCallerSuite extends TestUtil.SparkFunSuite with Should
     chr1Local should not be null
     assert(chr1Local.length > 59000, "Expected 59Kb of chromosome 1, got only %d".format(chr1Local.length))
 
-    val reference: RDD[(SimpleSomaticVariantCaller.Locus, Byte)] =
-      Reference.loadReference(path, sc)
-    val sortedBases: RDD[(SimpleSomaticVariantCaller.Locus, Byte)] = reference.sortByKey(ascending = true)
+    val reference = Reference.load(path, sc)
+    val sortedBases: RDD[(Reference.Locus, Byte)] = reference.bases.sortByKey(ascending = true)
     val noIndices = sortedBases.map(_._2)
     val baseArray = noIndices.collect().map(_.toChar)
 
