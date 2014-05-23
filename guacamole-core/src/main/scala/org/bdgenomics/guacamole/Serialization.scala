@@ -18,7 +18,6 @@
 
 package org.bdgenomics.guacamole
 
-
 import com.esotericsoftware.kryo.Kryo
 import org.bdgenomics.adam.serialization.{ ADAMKryoRegistrator }
 import somatic.Reference

@@ -8,8 +8,8 @@ import org.apache.spark.SparkContext._
 import org.apache.hadoop.io.{ Text, LongWritable }
 import org.apache.hadoop.mapred.TextInputFormat
 import scala.collection.mutable
-import org.bdgenomics.guacamole.{LociMapLongSingleContigSerializer, LociMap, Common}
-import com.esotericsoftware.kryo.{KryoSerializable, Kryo, Serializer}
+import org.bdgenomics.guacamole.{ LociMapLongSingleContigSerializer, LociMap, Common }
+import com.esotericsoftware.kryo.{ KryoSerializable, Kryo, Serializer }
 import com.esotericsoftware.kryo.io.{ Input, Output }
 
 case class Reference(bases: RDD[(Reference.Locus, Byte)],
@@ -19,17 +19,16 @@ object Reference {
 
   type Locus = (String, Long)
 
-
-  case class LocusPartitioner(n : Int, contigRanges : mutable.Map[String, (Long, Long)]) extends Partitioner {
+  case class LocusPartitioner(n: Int, contigRanges: mutable.Map[String, (Long, Long)]) extends Partitioner {
 
     // identity map on the end because serialization in Scala sucks
-    val contigSizes = contigRanges.mapValues({case (start, stop) => (stop - start) }).map(x => x)
+    val contigSizes = contigRanges.mapValues({ case (start, stop) => (stop - start) }).map(x => x)
     val totalNumLoci = contigSizes.values.reduce(_ + _)
 
-    val (_, lociBeforeContig) = contigSizes.foldLeft( (0L, Map[String,Long]())) {
+    val (_, lociBeforeContig) = contigSizes.foldLeft((0L, Map[String, Long]())) {
       case ((total, map), (k, n)) =>
         val newTotal = total + n
-        val newMap : Map[String, Long] = map + (k -> total)
+        val newMap: Map[String, Long] = map + (k -> total)
         (newTotal, newMap)
     }
 
@@ -37,33 +36,33 @@ object Reference {
       // in case n is too large
       Math.min(n, (totalNumLoci / 10000 + 1).toInt)
 
-    val lociPerPartition : Long = totalNumLoci / numPartitions.toLong
+    val lociPerPartition: Long = totalNumLoci / numPartitions.toLong
 
     def getPartition(key: Any): Int = {
       assert(key.isInstanceOf[Locus], "Not a locus: %s".format(key))
-      val (contig, offset) : (String, Long) = key.asInstanceOf[Locus]
-      val eltsBefore : Long = lociBeforeContig.getOrElse(contig, 0)
-      val globalPos : Long = eltsBefore + offset
+      val (contig, offset): (String, Long) = key.asInstanceOf[Locus]
+      val eltsBefore: Long = lociBeforeContig.getOrElse(contig, 0)
+      val globalPos: Long = eltsBefore + offset
       return (globalPos / lociPerPartition).toInt
     }
   }
 
   class LocusPartitionerSerializer extends Serializer[LocusPartitioner] {
 
-    def write(kryo : Kryo, output : Output, part : LocusPartitioner) {
+    def write(kryo: Kryo, output: Output, part: LocusPartitioner) {
       output.writeInt(part.n)
       output.writeInt(part.contigRanges.size)
-      for ((k,(start, stop)) <- part.contigRanges) {
+      for ((k, (start, stop)) <- part.contigRanges) {
         output.writeString(k)
         output.writeLong(start)
         output.writeLong(stop)
       }
     }
 
-    def read(kryo : Kryo, input : Input, t : Class[LocusPartitioner]) : LocusPartitioner = {
+    def read(kryo: Kryo, input: Input, t: Class[LocusPartitioner]): LocusPartitioner = {
       val numPartitions = input.readInt()
       val numContigs = input.readInt()
-      val contigRanges = mutable.Map[String, (Long,Long)]()
+      val contigRanges = mutable.Map[String, (Long, Long)]()
       for (i <- 0 to numContigs) {
         val k = input.readString()
         val start = input.readLong()
@@ -158,11 +157,10 @@ object Reference {
             ((contigName, pos - start - 1), seq)
         })
     })
-    val locusPartitioner : Partitioner = new LocusPartitioner(1000, referenceIndex)
+    val locusPartitioner: Partitioner = new LocusPartitioner(1000, referenceIndex)
     val repartitioned = locusLines.partitionBy(locusPartitioner)
     (repartitioned, referenceIndex.toMap)
   }
-
 
   def load(path: String, sc: SparkContext): Reference = {
     val (referenceLines, referenceIndex) = loadReferenceLines(path, sc)
