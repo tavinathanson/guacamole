@@ -22,10 +22,10 @@ import org.bdgenomics.adam.avro._
 import org.bdgenomics.guacamole.{ Common, Command }
 import org.bdgenomics.guacamole.Common.Arguments.{ OptionalOutput, Base }
 import org.bdgenomics.adam.cli.Args4j
-import org.apache.spark.rdd.{CoGroupedRDD, RDD}
+import org.apache.spark.rdd.{ CoGroupedRDD, RDD, ZippedPartition, ZippedPartitionsBaseRDD, ZippedPartitionsRDD3, ZippedRDD }
 import org.apache.spark.SparkContext._
 import org.apache.spark.SparkContext.rddToPairRDDFunctions
-import scala.collection.{mutable, JavaConversions}
+import scala.collection.{ mutable, JavaConversions }
 import org.bdgenomics.adam.rdd.ADAMContext._
 import net.sf.samtools.{ CigarOperator }
 import org.apache.spark._
@@ -33,6 +33,8 @@ import org.apache.hadoop.io.{ Text, LongWritable }
 import org.apache.hadoop.mapred.TextInputFormat
 import org.bdgenomics.guacamole.somatic.Reference.Locus
 import scala.Some
+import scala.reflect.ClassTag
+import java.io.{ ObjectOutputStream, IOException }
 
 /**
  * Simple somatic variant caller implementation.
@@ -66,38 +68,93 @@ object SimpleSomaticVariantCaller extends Command {
 
   type Pileup = Seq[BaseRead]
 
+  case class ZipJoinPartition3[A: ClassTag, B: ClassTag, C: ClassTag](idx: Int, a: RDD[A], b: RDD[B], c: RDD[C])
+      extends Partition {
+
+    var partition1 = a.partitions(idx)
+    var partition2 = b.partitions(idx)
+    var partition3 = c.partitions(idx)
+
+    override val index: Int = idx
+
+    def partitions = (partition1, partition2, partition3)
+
+    @throws(classOf[IOException])
+    private def writeObject(oos: ObjectOutputStream) {
+      // Update the reference to parent partition at the time of task serialization
+      partition1 = a.partitions(idx)
+      partition2 = b.partitions(idx)
+      partition3 = c.partitions(idx)
+      oos.defaultWriteObject()
+    }
+  }
+
+  def dep[T](a: RDD[T]) = new OneToOneDependency(a)
   /**
    * Using `rdd.join` results in very heavy shuffling and ultimately out-of-memory errors (or, others such as
    * use of too many file handles). So, for the case where
-   *@param tumor
-   * @param normal
-   * @param reference
+   * @param a
+   * @param b
+   * @param c
    */
-  case class AlignedPileupsRDD(tumor: RDD[(Locus, Pileup)],
-                               normal : RDD[(Locus, Pileup)],
-                               reference : RDD[(Locus, Byte)])
-    extends RDD[(Locus, (Pileup, Pileup, Byte))](
-      tumor.context,
-      Seq(new OneToOneDependency(tumor),
-          new OneToOneDependency(normal),
-          new OneToOneDependency(reference)))
-  {
-    assume(tumor.partitioner.isDefined)
-    assume(tumor.partitioner == normal.partitioner)
-    assume(tumor.partitioner == reference.partitioner)
+  class ZipJoinRDD3[K: ClassTag, A: ClassTag, B: ClassTag, C: ClassTag](
+    var a: RDD[(K, A)],
+    var b: RDD[(K, B)],
+    var c: RDD[(K, C)])
+      extends RDD[(K, (A, B, C))](
+        a.context,
+        Seq(new OneToOneDependency(a), new OneToOneDependency(b), new OneToOneDependency(c))) {
 
-    override def getPartitions: Array[Partition] = tumor.partitions
-    override val partitioner = tumor.partitioner    // Since filter cannot change a partition's keys
+    assume(a.partitioner.isDefined)
+    assume(a.partitioner == b.partitioner)
+    assume(a.partitioner == c.partitioner)
 
-    override def compute(split: Partition, context: TaskContext) : Iterator[(Locus, (Pileup, Pileup, Byte))] = {
-      val tumorMap = tumor.iterator(split, context).toMap
-      val referenceMap = reference.iterator(split, context).toMap
-      val combined = mutable.ArrayBuilder.make[(Locus,(Pileup, Pileup, Byte))]()
-      for ((locus,normalPileup) <- normal.iterator(split, context)) {
-        if (tumorMap.contains(locus)) {
-          val tumorPileup = tumorMap(locus)
-          val referenceNucleotide = referenceMap(locus)
-          val element : (Locus, (Pileup, Pileup, Byte)) =  (locus, (tumorPileup, normalPileup, referenceNucleotide))
+    override val partitioner = a.partitioner
+
+    override def getPartitions: Array[Partition] = {
+      assume(a.partitions.size == b.partitions.size)
+      assume(a.partitions.size == c.partitions.size)
+
+      val combinedPartitions = new Array[Partition](a.partitions.size)
+      for (i <- 0 until a.partitions.size) {
+        combinedPartitions(i) = new ZipJoinPartition3(i, a, b, c)
+      }
+      combinedPartitions
+    }
+
+    override def getPreferredLocations(s: Partition): Seq[String] = {
+      val (partition1, partition2, partition3) = s.asInstanceOf[ZipJoinPartition3[A, B, C]].partitions
+      val pref1 = a.preferredLocations(partition1)
+      val pref2 = b.preferredLocations(partition2)
+      val pref3 = c.preferredLocations(partition3)
+
+      // Check whether there are any hosts that match all three RDDs; otherwise return the union
+      val exactMatchLocations = pref1.intersect(pref2).intersect(pref3)
+      if (!exactMatchLocations.isEmpty) {
+        exactMatchLocations
+      } else {
+        (pref1 ++ pref2 ++ pref3).distinct
+      }
+    }
+
+    override def clearDependencies() {
+      super.clearDependencies()
+      a = null
+      b = null
+      c = null
+    }
+
+    override def compute(split: Partition, context: TaskContext): Iterator[(K, (A, B, C))] = {
+      val (aPartition, bPartition, cPartition) = split.asInstanceOf[ZipJoinPartition3[A, B, C]].partitions
+
+      val aMap = a.iterator(aPartition, context).toMap
+      val cMap = c.iterator(cPartition, context).toMap
+      val combined = mutable.ArrayBuilder.make[(K, (A, B, C))]()
+      for ((key, bValue) <- b.iterator(bPartition, context)) {
+        if (aMap.contains(key) && cMap.contains(key)) {
+          val aValue = aMap(key)
+          val cValue = cMap(key)
+          val element: (K, (A, B, C)) = (key, (aValue, bValue, cValue))
           combined += element
         }
       }
@@ -354,15 +411,16 @@ object SimpleSomaticVariantCaller extends Command {
    */
   def callVariants(tumorReads: RDD[SimpleRead],
                    normalReads: RDD[SimpleRead],
-                   referenceBases : RDD[(Locus,Byte)],
+                   referenceBases: RDD[(Locus, Byte)],
                    minBaseQuality: Int = 20,
                    minNormalCoverage: Int = 10,
                    minTumorCoverage: Int = 10,
-                   partitioner : Option[Partitioner] = None): RDD[ADAMGenotype] = {
+                   partitioner: Option[Partitioner] = None): RDD[ADAMGenotype] = {
 
     Common.progress("Entered callVariants")
     var normalPileups: RDD[(Locus, Pileup)] =
       buildPileups(normalReads, minBaseQuality, minNormalCoverage)
+
     var tumorPileups: RDD[(Locus, Pileup)] =
       buildPileups(tumorReads, minBaseQuality, minNormalCoverage)
 
@@ -381,14 +439,14 @@ object SimpleSomaticVariantCaller extends Command {
     Common.progress("-- Reference bases: %s with %d partitions".format(
       partitionedReference.getClass, partitionedReference.partitions.size))
 
-    val tumorNormalRef : RDD[(Locus, (Pileup, Pileup, Byte))] = partitioner match {
+    val tumorNormalRef: RDD[(Locus, (Pileup, Pileup, Byte))] = partitioner match {
       case None =>
         val joinedPileups: RDD[(Locus, (Pileup, Pileup))] = tumorPileups.join(normalPileups)
         Common.progress(
           "-- Joined tumor+normal pileups: %s with %d partitions (deps = %s)".format(
             joinedPileups.getClass, joinedPileups.partitions.size, joinedPileups.dependencies))
-        joinedPileups.join(partitionedReference).mapValues({case ((tumor, normal), ref) => (tumor, normal, ref) })
-      case Some(_) => AlignedPileupsRDD(tumorPileups, normalPileups, partitionedReference)
+        joinedPileups.join(partitionedReference).mapValues({ case ((tumor, normal), ref) => (tumor, normal, ref) })
+      case Some(_) => new ZipJoinRDD3(tumorPileups, normalPileups, partitionedReference)
     }
 
     Common.progress("Joined tumor+normal+reference genome: %s with %d partitions (deps = %s)".format(
@@ -419,9 +477,10 @@ object SimpleSomaticVariantCaller extends Command {
     val tumorReads: RDD[SimpleRead] = SimpleRead.loadFile(args.tumorReads, sc, true, true)
     val referencePath = args.referenceInput
     val reference = Reference.load(referencePath, sc)
-    val numPartitions : Int = Math.min(1200, (reference.numLoci / 10000L + 1).toInt)
-    val locusPartitioner: Partitioner = new Reference.LocusPartitioner(numPartitions, reference.contigSizes)
-    callVariants(tumorReads, normalReads, reference.bases, partitioner = Some(locusPartitioner))
+    val numPartitions: Int = Math.min(1200, (reference.index.numLoci / 10000L + 1).toInt)
+
+    val locusPartitioner: Partitioner = new Reference.LocusPartitioner(numPartitions, reference.index)
+    callVariants(tumorReads, normalReads, reference.basesAtLoci, partitioner = Some(locusPartitioner))
   }
 
   override def run(rawArgs: Array[String]): Unit = {

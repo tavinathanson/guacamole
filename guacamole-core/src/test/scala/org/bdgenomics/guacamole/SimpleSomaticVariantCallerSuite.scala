@@ -78,8 +78,9 @@ class SimpleSomaticVariantCallerSuite extends TestUtil.SparkFunSuite with Should
     val normal = loadReads("same_start_reads.sam")
     val tumor = loadReads("same_start_reads_snv_tumor.sam")
     val referenceBases = sc.parallelize(sameStartReferenceBases)
-    val contigSizes = Map[String,Long]("artificial" -> sameStartReferenceBases.length.toLong)
-    val partitioner = Reference.LocusPartitioner(5, contigSizes)
+    val contigSizes = Map[String, Long]("artificial" -> sameStartReferenceBases.length.toLong)
+    val index = Reference.Index(contigSizes)
+    val partitioner = Reference.LocusPartitioner(5, index)
     val genotypes: RDD[ADAMGenotype] =
       SimpleSomaticVariantCaller.callVariants(tumor, normal, referenceBases, partitioner = Some(partitioner))
     genotypes.collect.toList should have length 1
@@ -149,7 +150,7 @@ class SimpleSomaticVariantCallerSuite extends TestUtil.SparkFunSuite with Should
 
     val reference = Reference.load(path, sc)
     Common.progress("test loaded reference")
-    val sortedBases: RDD[(Reference.Locus, Byte)] = reference.bases.sortByKey(ascending = true)
+    val sortedBases: RDD[(Reference.Locus, Byte)] = reference.basesAtLoci.sortByKey(ascending = true)
     Common.progress("test sorted reference")
     val noIndices = sortedBases.map(_._2)
 

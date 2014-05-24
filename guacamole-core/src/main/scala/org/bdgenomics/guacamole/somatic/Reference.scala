@@ -12,19 +12,24 @@ import org.bdgenomics.guacamole.{ LociMapLongSingleContigSerializer, LociMap, Co
 import com.esotericsoftware.kryo.{ KryoSerializable, Kryo, Serializer }
 import com.esotericsoftware.kryo.io.{ Input, Output }
 
-case class Reference(bases: RDD[(Reference.Locus, Byte)],
-                     contigSizes : Map[String, Long]) {
-  val numLoci : Long = contigSizes.values.reduce(_ + _)
+case class Reference(basesAtLoci: RDD[(Reference.Locus, Byte)],
+                     index: Reference.Index) {
+  val basesAtGlobalPositions: RDD[(Long, Byte)] =
+    basesAtLoci.map({
+      case (locus, nucleotide) =>
+        val position: Long = index.locusToGlobalPosition(locus)
+        (position, nucleotide)
+    })
 }
 
 object Reference {
 
   type Locus = (String, Long)
 
-  case class LocusPartitioner(n: Int, contigSizes: Map[String, Long]) extends Partitioner {
-
-    val totalNumLoci = contigSizes.values.reduce(_ + _)
-
+  case class Index(contigSizes: Map[String, Long]) {
+    val numLoci: Long = contigSizes.values.reduce(_ + _)
+    val contigs = contigSizes.keys.toList
+    val numContigs: Int = contigs.length
     val (_, lociBeforeContig) = contigSizes.foldLeft((0L, Map[String, Long]())) {
       case ((total, map), (k, n)) =>
         val newTotal = total + n
@@ -32,16 +37,24 @@ object Reference {
         (newTotal, newMap)
     }
 
+    def locusToGlobalPosition(locus: Reference.Locus): Long = {
+      val (contig, offset) = locus
+      val eltsBefore: Long = lociBeforeContig.getOrElse(contig, 0)
+      eltsBefore + offset
+    }
+
+  }
+
+  case class LocusPartitioner(n: Int, index: Index) extends Partitioner {
+
     def numPartitions = n
 
-    val lociPerPartition: Long = totalNumLoci / numPartitions.toLong
+    val lociPerPartition: Long = index.numLoci / numPartitions.toLong
 
     def getPartition(key: Any): Int = {
       assert(key.isInstanceOf[Locus], "Not a locus: %s".format(key))
-      val (contig, offset): (String, Long) = key.asInstanceOf[Locus]
-      val eltsBefore: Long = lociBeforeContig.getOrElse(contig, 0)
-      val globalPos: Long = eltsBefore + offset
-      return (globalPos / lociPerPartition).toInt
+      val globalPos: Long = index.locusToGlobalPosition(key.asInstanceOf[Locus])
+      (globalPos / lociPerPartition).toInt
     }
   }
 
@@ -132,8 +145,8 @@ object Reference {
             ((contigName, pos - start - 1), seq)
         })
     })
-    val lineLengths : RDD[(String,Long)] = locusLines.map({case ((contig, _), line) => (contig, line.length.toLong)})
-    val contigSizes : Map[String, Long] = lineLengths.reduceByKey(_ + _).collectAsMap().toMap
+    val lineLengths: RDD[(String, Long)] = locusLines.map({ case ((contig, _), line) => (contig, line.length.toLong) })
+    val contigSizes: Map[String, Long] = lineLengths.reduceByKey(_ + _).collectAsMap().toMap
     (locusLines, contigSizes)
   }
 
@@ -147,7 +160,8 @@ object Reference {
    */
   def load(path: String, sc: SparkContext): Reference = {
     val (referenceLines, contigSizes) = loadReferenceLines(path, sc)
+    val index = Index(contigSizes)
     val bases = referenceLines.flatMap({ case (locus, bytes) => bytes.map((c: Byte) => (locus, c)) })
-    Reference(bases, contigSizes)
+    Reference(bases, index)
   }
 }
