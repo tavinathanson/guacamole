@@ -49,6 +49,7 @@ class SimpleSomaticVariantCallerSuite extends TestUtil.SparkFunSuite with Should
   val sameStartContigName = "artificial"
   val sameStartReferenceBases: List[((String, Long), Byte)] =
     zipWithReferenceIndices(sameStartReferenceSeq, sameStartContigName)
+  val sameStartIndex = Reference.Index(Map[String, Long]("artifical" -> 70))
 
   sparkTest("No repeated positions in pileup RDD") {
     val normalReads = loadReads("same_start_reads.sam")
@@ -63,26 +64,17 @@ class SimpleSomaticVariantCallerSuite extends TestUtil.SparkFunSuite with Should
 
   sparkTest("No variants when tumor/normal identical") {
     val reads = loadReads("same_start_reads.sam")
-    val genotypes = SimpleSomaticVariantCaller.callVariants(reads, reads, sc.parallelize(sameStartReferenceBases))
+    val reference = Reference(sc.parallelize(sameStartReferenceBases), sameStartIndex)
+    val genotypes = SimpleSomaticVariantCaller.callVariants(reads, reads, reference)
     genotypes.collect.toList should have length (0)
   }
 
   sparkTest("Simple SNV in same_start_reads") {
     val normal = loadReads("same_start_reads.sam")
     val tumor = loadReads("same_start_reads_snv_tumor.sam")
+    val reference = Reference(sc.parallelize(sameStartReferenceBases), sameStartIndex)
     val genotypes: RDD[ADAMGenotype] =
-      SimpleSomaticVariantCaller.callVariants(tumor, normal, sc.parallelize(sameStartReferenceBases))
-    genotypes.collect.toList should have length 1
-  }
-  sparkTest("Simple SNV in same_start_reads w/ manual LocusPartitioner") {
-    val normal = loadReads("same_start_reads.sam")
-    val tumor = loadReads("same_start_reads_snv_tumor.sam")
-    val referenceBases = sc.parallelize(sameStartReferenceBases)
-    val contigSizes = Map[String, Long]("artificial" -> sameStartReferenceBases.length.toLong)
-    val index = Reference.Index(contigSizes)
-    val partitioner = Reference.LocusPartitioner(5, index)
-    val genotypes: RDD[ADAMGenotype] =
-      SimpleSomaticVariantCaller.callVariants(tumor, normal, referenceBases, partitioner = Some(partitioner))
+      SimpleSomaticVariantCaller.callVariants(tumor, normal, reference)
     genotypes.collect.toList should have length 1
   }
 
@@ -90,14 +82,15 @@ class SimpleSomaticVariantCallerSuite extends TestUtil.SparkFunSuite with Should
   val noMdtagReference =
     "CCCTATTAACCACTCACGGGAGCTCTCCATGCATTTGGTATTTTCGTCTGGGGGGTCTGCACGCGATAGCATTGCGAGACGCTGGAGCCGGAGCACCCTA"
   val noMdtagReferenceBases = zipWithReferenceIndices(noMdtagReference, "chrM", 16)
+  val noMdTagIndex = Reference.Index(Map[String, Long]("M" -> noMdtagReference.length))
 
   sparkTest("Simple SNV from SAM files with soft clipped reads and no MD tags") {
     // tumor SAM file was modified by replacing C>G at positions 17-19
     val normal = loadReads("normal_without_mdtag.sam")
     val tumor = loadReads("tumor_without_mdtag.sam")
-
+    val reference = Reference(sc.parallelize(noMdtagReferenceBases), noMdTagIndex)
     val genotypes: RDD[ADAMGenotype] =
-      SimpleSomaticVariantCaller.callVariants(tumor, normal, sc.parallelize(noMdtagReferenceBases))
+      SimpleSomaticVariantCaller.callVariants(tumor, normal, reference)
     val localGenotypes: List[ADAMGenotype] = genotypes.collect.toList
     println("# of variants: %d".format(localGenotypes.length))
     localGenotypes should have length 3
@@ -149,18 +142,19 @@ class SimpleSomaticVariantCallerSuite extends TestUtil.SparkFunSuite with Should
     assert(chr1Local.length > 59000, "Expected 59Kb of chromosome 1, got only %d".format(chr1Local.length))
 
     val reference = Reference.load(path, sc)
-    Common.progress("test loaded reference")
-    val sortedBases: RDD[(Reference.Locus, Byte)] = reference.basesAtLoci.sortByKey(ascending = true)
-    Common.progress("test sorted reference")
-    val noIndices = sortedBases.map(_._2)
+    val sortedLociBases: RDD[(Reference.Locus, Byte)] = reference.basesAtLoci.sortByKey(ascending = true)
+    val noLoci = sortedLociBases.map(_._2)
+    val baseArrayNoLoci = noLoci.collect().map(_.toChar)
+    assert(baseArrayNoLoci.length == chr1Local.length,
+      "Distributed chromosome length %d != local length %d".format(baseArrayNoLoci.length, chr1Local.length))
+    baseArrayNoLoci.mkString("") should be(chr1Local)
 
-    val baseArray = noIndices.collect().map(_.toChar)
-    Common.progress("test collected bases")
-    assert(baseArray.length == chr1Local.length,
-      "Distributed chromosome length %d != local length %d".format(baseArray.length, chr1Local.length))
-    val sequence = baseArray.mkString("")
-    sequence should be(chr1Local)
-
+    val sortedIndexBases: RDD[(Long, Byte)] = reference.basesAtGlobalPositions.sortByKey(ascending = true)
+    val noIndices = sortedIndexBases.map(_._2)
+    val baseArrayNoIndices = noIndices.collect().map(_.toChar)
+    assert(baseArrayNoIndices.length == chr1Local.length,
+      "Distributed chromosome length %d != local length %d".format(baseArrayNoIndices.length, chr1Local.length))
+    baseArrayNoIndices.mkString("") should be(chr1Local)
   }
 
 }

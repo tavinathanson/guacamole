@@ -30,16 +30,49 @@ object Reference {
     val numLoci: Long = contigSizes.values.reduce(_ + _)
     val contigs = contigSizes.keys.toList
     val numContigs: Int = contigs.length
-    val (_, lociBeforeContig) = contigSizes.foldLeft((0L, Map[String, Long]())) {
-      case ((total, map), (k, n)) =>
+    val (_, contigStart) = contigs.foldLeft((0L, Map[String, Long]())) {
+      case ((total, map), k) =>
+        val n = contigSizes(k)
         val newTotal = total + n
         val newMap: Map[String, Long] = map + (k -> total)
         (newTotal, newMap)
     }
 
+    val contigStartArray : Array[(Long, String)] = contigs.map {
+      contig =>
+        val start : Long = contigStart(contig)
+        (start, contig)
+    }.toArray
+
+    def globalPositionToLocus(globalPosition : Long) : Reference.Locus = {
+      val numContigs = contigStartArray.length
+      val lastContigIndex = numContigs - 1
+
+      var lower = 0
+      var upper = lastContigIndex
+
+      // binary search to find which locus the position belongs to
+      while (lower != upper) {
+        // midpoint between i & j in indices
+        val middle = (upper + lower) / 2
+        val (currentPosition, currentContig) = contigStartArray(middle)
+
+        if (currentPosition <= globalPosition) {
+          // if the query position is between the current contig and the next one,
+          // then just return the offset
+          if ((middle < lastContigIndex) && (contigStartArray(middle + 1)._1 > globalPosition)) {
+            return (currentContig, globalPosition - currentPosition)
+          } else { lower = middle }
+        } else { upper = middle }
+      }
+      assert (lower == upper)
+      val (startPosition, contig) = contigStartArray(lower)
+      (contig, globalPosition - startPosition)
+    }
+
     def locusToGlobalPosition(locus: Reference.Locus): Long = {
       val (contig, offset) = locus
-      val eltsBefore: Long = lociBeforeContig.getOrElse(contig, 0)
+      val eltsBefore: Long = contigStart.getOrElse(contig, 0)
       eltsBefore + offset
     }
 
