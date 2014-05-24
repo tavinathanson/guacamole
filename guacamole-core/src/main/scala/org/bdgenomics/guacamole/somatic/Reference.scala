@@ -13,17 +13,16 @@ import com.esotericsoftware.kryo.{ KryoSerializable, Kryo, Serializer }
 import com.esotericsoftware.kryo.io.{ Input, Output }
 
 case class Reference(bases: RDD[(Reference.Locus, Byte)],
-                     contigRanges: Map[String, (Long, Long)],
-                     numLoci : Long) {}
+                     contigSizes : Map[String, Long]) {
+  val numLoci : Long = contigSizes.values.reduce(_ + _)
+}
 
 object Reference {
 
   type Locus = (String, Long)
 
-  case class LocusPartitioner(n: Int, contigRanges: Map[String, (Long, Long)]) extends Partitioner {
+  case class LocusPartitioner(n: Int, contigSizes: Map[String, Long]) extends Partitioner {
 
-    // identity map on the end because serialization in Scala sucks
-    val contigSizes = contigRanges.mapValues({ case (start, stop) => (stop - start) }).map(x => x)
     val totalNumLoci = contigSizes.values.reduce(_ + _)
 
     val (_, lociBeforeContig) = contigSizes.foldLeft((0L, Map[String, Long]())) {
@@ -46,32 +45,6 @@ object Reference {
     }
   }
 
-  /*
-  class LocusPartitionerSerializer extends Serializer[LocusPartitioner] {
-
-    def write(kryo: Kryo, output: Output, part: LocusPartitioner) {
-      output.writeInt(part.n)
-      output.writeInt(part.contigRanges.size)
-      for ((k, (start, stop)) <- part.contigRanges) {
-        output.writeString(k)
-        output.writeLong(start)
-        output.writeLong(stop)
-      }
-    }
-
-    def read(kryo: Kryo, input: Input, t: Class[LocusPartitioner]): LocusPartitioner = {
-      val numPartitions = input.readInt()
-      val numContigs = input.readInt()
-      val contigRanges = mutable.Map[String, (Long, Long)]()
-      for (i <- 0 to numContigs) {
-        val k = input.readString()
-        val start = input.readLong()
-        val stop = input.readLong()
-        contigRanges(k) = (start, stop)
-      }
-      LocusPartitioner(numPartitions, contigRanges.toMap)
-    }
-  }*/
   /**
    *
    * Since formats/sources differ on whether to call a chromosome "chr1" vs. "1"
@@ -93,7 +66,7 @@ object Reference {
    * @param sc
    * @return
    */
-  def loadReferenceLines(path: String, sc: SparkContext): (RDD[(Locus, Array[Byte])], Map[String, (Long, Long)]) = {
+  def loadReferenceLines(path: String, sc: SparkContext): (RDD[(Locus, Array[Byte])], Map[String, Long]) = {
 
     // Hadoop loads a text file into an RDD of lines keyed by byte offsets
     val fastaByteOffsetsAndLines: RDD[(Long, Array[Byte])] =
@@ -134,22 +107,24 @@ object Reference {
           (lineNumber, contigName)
       })
     val referenceContigBytes = referenceContigNames.map(_._1)
-    val referenceIndex = mutable.Map[String, (Long, Long)]()
+
+    // start and stop bytes associated with each contig name
+    val contigByteRanges = mutable.Map[String, (Long, Long)]()
     for ((start, contigName) <- referenceContigNames) {
       // stop of this contig is the start line of the next one
       val stopCandidates = referenceContigBytes.filter(_ > start)
       val stop = if (stopCandidates.length > 0) stopCandidates.min else numLines
-      referenceIndex(contigName) = (start, stop)
+      contigByteRanges(contigName) = (start, stop)
     }
     // hand-waiving around performance of closure objects by broadcasting
     // every collection that should be shared by multiple workers
-    val referenceIndexBroadcast = sc.broadcast(referenceIndex)
+    val byteRangesBroadcast = sc.broadcast(contigByteRanges)
     Common.progress("-- broadcast reference index")
 
     // associate each line with whichever contig contains it
     val locusLines = numberedLines.flatMap({
       case (pos, seq) =>
-        referenceIndexBroadcast.value.find({
+        byteRangesBroadcast.value.find({
           case (_, (start, stop)) =>
             (start < pos && stop > pos)
         }).map({
@@ -157,13 +132,22 @@ object Reference {
             ((contigName, pos - start - 1), seq)
         })
     })
-    (locusLines, referenceIndex.toMap)
+    val lineLengths : RDD[(String,Long)] = locusLines.map({case ((contig, _), line) => (contig, line.length.toLong)})
+    val contigSizes : Map[String, Long] = lineLengths.reduceByKey(_ + _).collectAsMap().toMap
+    (locusLines, contigSizes)
   }
 
+  /**
+   * Load a FASTA reference file into a Reference object, which contans
+   * an RDD of (Locus,Byte) for each nucleotide and a Map[Locus, (Long,Long)] of
+   * start/stop
+   * @param path
+   * @param sc
+   * @return
+   */
   def load(path: String, sc: SparkContext): Reference = {
-    val (referenceLines, referenceIndex) = loadReferenceLines(path, sc)
+    val (referenceLines, contigSizes) = loadReferenceLines(path, sc)
     val bases = referenceLines.flatMap({ case (locus, bytes) => bytes.map((c: Byte) => (locus, c)) })
-    val numLoci : Long = referenceIndex.values.map({case (start, stop) => stop - start}).reduce(_ + _)
-    Reference(bases, referenceIndex, numLoci)
+    Reference(bases, contigSizes)
   }
 }

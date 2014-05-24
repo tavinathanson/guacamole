@@ -71,7 +71,17 @@ class SimpleSomaticVariantCallerSuite extends TestUtil.SparkFunSuite with Should
     val normal = loadReads("same_start_reads.sam")
     val tumor = loadReads("same_start_reads_snv_tumor.sam")
     val genotypes: RDD[ADAMGenotype] =
-      SimpleSomaticVariantCaller.callVariants(normal, tumor, sc.parallelize(sameStartReferenceBases))
+      SimpleSomaticVariantCaller.callVariants(tumor, normal, sc.parallelize(sameStartReferenceBases))
+    genotypes.collect.toList should have length 1
+  }
+  sparkTest("Simple SNV in same_start_reads w/ manual LocusPartitioner") {
+    val normal = loadReads("same_start_reads.sam")
+    val tumor = loadReads("same_start_reads_snv_tumor.sam")
+    val referenceBases = sc.parallelize(sameStartReferenceBases)
+    val contigSizes = Map[String,Long]("artificial" -> sameStartReferenceBases.length.toLong)
+    val partitioner = Reference.LocusPartitioner(5, contigSizes)
+    val genotypes: RDD[ADAMGenotype] =
+      SimpleSomaticVariantCaller.callVariants(tumor, normal, referenceBases, partitioner = Some(partitioner))
     genotypes.collect.toList should have length 1
   }
 
@@ -86,7 +96,7 @@ class SimpleSomaticVariantCallerSuite extends TestUtil.SparkFunSuite with Should
     val tumor = loadReads("tumor_without_mdtag.sam")
 
     val genotypes: RDD[ADAMGenotype] =
-      SimpleSomaticVariantCaller.callVariants(normal, tumor, sc.parallelize(noMdtagReferenceBases))
+      SimpleSomaticVariantCaller.callVariants(tumor, normal, sc.parallelize(noMdtagReferenceBases))
     val localGenotypes: List[ADAMGenotype] = genotypes.collect.toList
     println("# of variants: %d".format(localGenotypes.length))
     localGenotypes should have length 3
