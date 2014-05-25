@@ -312,10 +312,15 @@ object SimpleSomaticVariantCaller extends Command {
   def buildPileups(reads: RDD[SimpleRead],
                    minBaseQuality: Int = 0,
                    minDepth: Int = 0): RDD[(Locus, Pileup)] = {
-    val baseReadsAtPos: RDD[(Locus, BaseRead)] = reads.flatMap(expandBaseReads _)
-    val filteredBaseReads = baseReadsAtPos.filter(_._2.readQuality.getOrElse(minBaseQuality) >= minBaseQuality)
-    val pileups = filteredBaseReads.groupByKey()
-    pileups.filter(_._2.length >= minDepth)
+    var baseReadsAtPos: RDD[(Locus, BaseRead)] = reads.flatMap(expandBaseReads _)
+    if (minBaseQuality > 0) {
+      baseReadsAtPos = baseReadsAtPos.filter(_._2.readQuality.getOrElse(minBaseQuality) >= minBaseQuality)
+    }
+    var pileups = baseReadsAtPos.groupByKey()
+    if (minDepth > 0) {
+      pileups = pileups.filter(_._2.length >= minDepth)
+    }
+    pileups
   }
 
   /**
