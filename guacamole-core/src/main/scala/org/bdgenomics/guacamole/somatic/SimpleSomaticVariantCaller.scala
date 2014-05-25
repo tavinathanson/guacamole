@@ -23,7 +23,7 @@ import org.bdgenomics.guacamole.{ Common, Command }
 import org.bdgenomics.guacamole.Common.Arguments.{ OptionalOutput, Base }
 import org.bdgenomics.adam.cli.Args4j
 import org.apache.spark.rdd.RDD
-import org.apache.spark.{Logging, RangePartitioner}
+import org.apache.spark.{ Logging, RangePartitioner }
 import org.apache.spark.SparkContext._
 import org.apache.spark.SparkContext.rddToPairRDDFunctions
 import scala.collection.{ mutable, JavaConversions }
@@ -412,15 +412,15 @@ object SimpleSomaticVariantCaller extends Command {
    */
   def callVariants(tumorReads: RDD[SimpleRead],
                    normalReads: RDD[SimpleRead],
-                   reference : Reference,
+                   reference: Reference,
                    minBaseQuality: Int = 20,
                    minNormalCoverage: Int = 10,
-                   minTumorCoverage: Int = 10) : RDD[ADAMGenotype] = {
+                   minTumorCoverage: Int = 10): RDD[ADAMGenotype] = {
 
     Common.progress("Entered callVariants")
 
     val broadcastIndex = tumorReads.context.broadcast(reference.index)
-    def locusKeyToLong(kv : (Locus, Pileup)) : (Long, Pileup) = {
+    def locusKeyToLong(kv: (Locus, Pileup)): (Long, Pileup) = {
       val (locus, pileup) = kv
       val position = broadcastIndex.value.locusToGlobalPosition(locus)
       (position, pileup)
@@ -434,7 +434,7 @@ object SimpleSomaticVariantCaller extends Command {
     val numTumorPartitions = tumorPileups.partitions.size
     val maxPartitions = (reference.index.numLoci / 10000L + 1).toInt
     val numPartitions: Int = Math.min(numTumorPartitions, maxPartitions)
-    val partitioner  : Partitioner = new RangePartitioner(numPartitions, tumorPileups)
+    val partitioner: Partitioner = new RangePartitioner(numPartitions, tumorPileups)
     Common.progress("-- Repartitioning using %s".format(partitioner))
 
     tumorPileups = tumorPileups.partitionBy(partitioner)
@@ -457,7 +457,7 @@ object SimpleSomaticVariantCaller extends Command {
     Common.progress("Joined tumor+normal+reference genome: %s with %d partitions (deps = %s)".format(
       tumorNormalRef.getClass, tumorNormalRef.partitions.size, tumorNormalRef.dependencies))
 
-    val genotypes : RDD[ADAMGenotype] = tumorNormalRef.flatMap({
+    val genotypes: RDD[ADAMGenotype] = tumorNormalRef.flatMap({
       case (globalPosition, (tumorPileup, normalPileup, ref)) =>
         val locus = broadcastIndex.value.globalPositionToLocus(globalPosition)
         callVariantGenotype(locus, tumorPileup, normalPileup, ref)
@@ -466,7 +466,7 @@ object SimpleSomaticVariantCaller extends Command {
       genotypes.getClass, genotypes.partitions.size, genotypes.dependencies))
 
     genotypes.keyBy({
-      genotype : ADAMGenotype =>
+      genotype: ADAMGenotype =>
         (genotype.getVariant.getContig.getContigName.toString, genotype.getVariant.getPosition)
     }).sortByKey().values
   }

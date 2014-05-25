@@ -106,6 +106,36 @@ class SimpleSomaticVariantCallerSuite extends TestUtil.SparkFunSuite with Should
     }
   }
 
+  sparkTest("Reference with multiple chromosomes") {
+    // tumor SAM file was modified by replacing C>G at positions 17-19
+    val normal = loadReads("normal_without_mdtag.sam")
+    val tumor = loadReads("tumor_without_mdtag.sam")
+
+    val chrM = zipWithReferenceIndices(noMdtagReference, "chrM", 16)
+    val chrX = zipWithReferenceIndices(noMdtagReference, "chrX", 0)
+    val chrY = zipWithReferenceIndices(noMdtagReference, "chrY", 100)
+    val chr1 = zipWithReferenceIndices(noMdtagReference, "chr1", 100)
+    val bases = chr1 ++ chrM ++ chrX ++ chrY
+    val n = noMdtagReference.length
+    val index = Reference.Index(Map[String, Long]("M" -> n, "X" -> n, "Y" -> n))
+    val reference = Reference(sc.parallelize(bases), index)
+    val genotypes: RDD[ADAMGenotype] =
+      SimpleSomaticVariantCaller.callVariants(tumor, normal, reference)
+    val localGenotypes: List[ADAMGenotype] = genotypes.collect.toList
+    println("# of variants: %d".format(localGenotypes.length))
+    localGenotypes should have length 3
+    for (offset: Int <- 0 to 2) {
+      val genotype: ADAMGenotype = localGenotypes(offset)
+      val variant = genotype.getVariant
+      val pos = variant.getPosition
+      pos should be(16 + offset)
+      val altSeq = variant.getVariantAllele
+      altSeq should have length 1
+      val alt = altSeq.charAt(0)
+      alt should be('G')
+    }
+  }
+
   /**
    * Scan through a FASTA reference file and return a particular contig sequence
    *

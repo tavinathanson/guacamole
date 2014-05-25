@@ -38,13 +38,13 @@ object Reference {
         (newTotal, newMap)
     }
 
-    val contigStartArray : Array[(Long, String)] = contigs.map {
+    val contigStartArray: Array[(Long, String)] = contigs.map {
       contig =>
-        val start : Long = contigStart(contig)
+        val start: Long = contigStart(contig)
         (start, contig)
     }.toArray
 
-    def globalPositionToLocus(globalPosition : Long) : Reference.Locus = {
+    def globalPositionToLocus(globalPosition: Long): Reference.Locus = {
       val numContigs = contigStartArray.length
       val lastContigIndex = numContigs - 1
 
@@ -65,7 +65,7 @@ object Reference {
           } else { lower = middle }
         } else { upper = middle }
       }
-      assert (lower == upper)
+      assert(lower == upper)
       val (startPosition, contig) = contigStartArray(lower)
       (contig, globalPosition - startPosition)
     }
