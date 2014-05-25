@@ -23,19 +23,19 @@ import org.bdgenomics.guacamole.{ Common, Command }
 import org.bdgenomics.guacamole.Common.Arguments.{ OptionalOutput, Base }
 import org.bdgenomics.adam.cli.Args4j
 import org.apache.spark.rdd.RDD
-import org.apache.spark.{ Logging, RangePartitioner }
+import org.apache.spark._
 import org.apache.spark.SparkContext._
 import org.apache.spark.SparkContext.rddToPairRDDFunctions
 import scala.collection.{ mutable, JavaConversions }
 import org.bdgenomics.adam.rdd.ADAMContext._
 import net.sf.samtools.{ CigarOperator }
-import org.apache.spark._
 import org.apache.hadoop.io.{ Text, LongWritable }
 import org.apache.hadoop.mapred.TextInputFormat
 import org.bdgenomics.guacamole.somatic.Reference.Locus
 import scala.Some
 import scala.reflect.ClassTag
 import java.io.{ ObjectOutputStream, IOException }
+import scala.Some
 
 /**
  * Simple somatic variant caller implementation.
@@ -163,6 +163,32 @@ object SimpleSomaticVariantCaller extends Command {
     }
   }
 
+  /**
+   * Simplified version of a RangePartitioner which does even splits instead of sampling. May suffer from skew.
+   *
+   * @param partitions
+   * @param rdd
+   * @tparam V
+   */
+  class UniformLongPartitioner[V: ClassTag](partitions: Int, @transient rdd: RDD[(Long, V)]) extends Partitioner {
+
+    val maxIndex = rdd.keys.reduce(Math.max)
+    val elementsPerPartition: Long = (maxIndex / partitions.toLong) + 1
+
+    def numPartitions = partitions
+
+    def getPartition(key: Any): Int = {
+      val idx = key.asInstanceOf[Long]
+      (idx / elementsPerPartition).toInt % partitions
+    }
+
+    override def equals(other: Any): Boolean = other match {
+      case r: UniformLongPartitioner[_] =>
+        r.maxIndex == maxIndex && r.numPartitions == numPartitions
+      case _ =>
+        false
+    }
+  }
   /**
    *  Create a simple BaseRead object from the CIGAR operator and other information about a read at a
    *  given position `readPos`.
@@ -434,8 +460,9 @@ object SimpleSomaticVariantCaller extends Command {
     val numTumorPartitions = tumorPileups.partitions.size
     val maxPartitions = (reference.index.numLoci / 10000L + 1).toInt
     val numPartitions: Int = Math.min(numTumorPartitions, maxPartitions)
-    val partitioner: Partitioner = new RangePartitioner(numPartitions, tumorPileups)
-    Common.progress("-- Repartitioning using %s".format(partitioner))
+    Common.progress("-- Splitting data into %d parts".format(numPartitions))
+    val partitioner: Partitioner = new UniformLongPartitioner(numPartitions, tumorPileups) // new RangePartitioner(numPartitions, tumorPileups)
+    Common.progress("-- Partitioner: %s".format(partitioner))
 
     tumorPileups = tumorPileups.partitionBy(partitioner)
     Common.progress("-- Tumor pileups: %s with %d partitions".format(

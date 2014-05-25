@@ -119,11 +119,11 @@ object Reference {
       sc.hadoopFile[LongWritable, Text, TextInputFormat](path).map({
         case (x, y) => (x.get(), y.getBytes)
       })
-    val sortedSequences: RDD[(Long, Array[Byte])] = fastaByteOffsetsAndLines.sortByKey(ascending = true)
-    val numLines = sortedSequences.count
+    val sortedSequences: RDD[(Long, Array[Byte])] = fastaByteOffsetsAndLines.sortByKey(ascending = true).cache()
     val partitionSizes: Array[Long] = sortedSequences.mapPartitions({
       partition => Seq(partition.length.toLong).iterator
     }).collect()
+    val numLines = partitionSizes.reduce(_ + _)
     Common.progress("-- collected reference partition sizes")
     val partitionSizesBroadcast = sc.broadcast(partitionSizes)
     val numberedLines: RDD[(Long, Array[Byte])] = sortedSequences.mapPartitionsWithIndex {
