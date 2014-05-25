@@ -36,6 +36,7 @@ import scala.Some
 import scala.reflect.ClassTag
 import java.io.{ ObjectOutputStream, IOException }
 import scala.Some
+import org.apache.spark.broadcast.Broadcast
 
 /**
  * Simple somatic variant caller implementation.
@@ -268,7 +269,7 @@ object SimpleSomaticVariantCaller extends Command {
    * @param record Single short-read (contains multiple bases)
    * @return Sequence of bases contained in input
    */
-  def expandBaseReads(record: SimpleRead): Seq[(Locus, BaseRead)] = {
+  def expandBaseReads(record: SimpleRead, referenceIndex: Broadcast[Reference.Index]): Seq[(Long, BaseRead)] = {
     val alignmentQuality = record.alignmentQuality
     assume(alignmentQuality >= 0, "Expected non-negative alignment quality, got %d".format(alignmentQuality))
     // using unclipped start since we're considering
@@ -277,7 +278,7 @@ object SimpleSomaticVariantCaller extends Command {
     var refPos: Long = record.unclippedStart
     assume(refPos >= 0, "Expected non-negative unclipped start, got %d".format(refPos))
     var readPos = 0
-    val result = mutable.MutableList[(Locus, BaseRead)]()
+    val result = mutable.MutableList[(Long, BaseRead)]()
     val baseSequence: Array[Byte] = record.baseSequence
     val qualityScores: Array[Byte] = record.baseQualities
     val contig = record.referenceContig
@@ -290,7 +291,8 @@ object SimpleSomaticVariantCaller extends Command {
           case None => ()
           case Some(baseRead) =>
             val locus = (contig, refPos)
-            result += ((locus, baseRead))
+            val position: Long = referenceIndex.value.locusToGlobalPosition(locus)
+            result += ((position, baseRead))
         }
 
         if (cigarOp.consumesReferenceBases) { refPos += 1 }
@@ -310,9 +312,10 @@ object SimpleSomaticVariantCaller extends Command {
    * @return RDD of position, pileup pairs
    */
   def buildPileups(reads: RDD[SimpleRead],
+                   referenceIndex: Broadcast[Reference.Index],
                    minBaseQuality: Int = 0,
-                   minDepth: Int = 0): RDD[(Locus, Pileup)] = {
-    var baseReadsAtPos: RDD[(Locus, BaseRead)] = reads.flatMap(expandBaseReads _)
+                   minDepth: Int = 0): RDD[(Long, Pileup)] = {
+    var baseReadsAtPos: RDD[(Long, BaseRead)] = reads.flatMap(expandBaseReads(_, referenceIndex))
     if (minBaseQuality > 0) {
       baseReadsAtPos = baseReadsAtPos.filter(_._2.readQuality.getOrElse(minBaseQuality) >= minBaseQuality)
     }
@@ -449,19 +452,14 @@ object SimpleSomaticVariantCaller extends Command {
                    minTumorCoverage: Int = 10): RDD[ADAMGenotype] = {
 
     Common.progress("Entered callVariants")
-
     val broadcastIndex = tumorReads.context.broadcast(reference.index)
-    def locusKeyToLong(kv: (Locus, Pileup)): (Long, Pileup) = {
-      val (locus, pileup) = kv
-      val position = broadcastIndex.value.locusToGlobalPosition(locus)
-      (position, pileup)
-    }
+    Common.progress("Broadcast reference index")
     var normalPileups: RDD[(Long, Pileup)] =
-      buildPileups(normalReads, minBaseQuality, minNormalCoverage).map(locusKeyToLong _)
-
+      buildPileups(normalReads, broadcastIndex, minBaseQuality, minNormalCoverage)
+    Common.progress("Built normal pileups")
     var tumorPileups: RDD[(Long, Pileup)] =
-      buildPileups(tumorReads, minBaseQuality, minNormalCoverage).map(locusKeyToLong _)
-
+      buildPileups(tumorReads, broadcastIndex, minBaseQuality, minNormalCoverage)
+    Common.progress("Built tumor pileups")
     val numTumorPartitions = tumorPileups.partitions.size
     val maxPartitions = (reference.index.numLoci / 10000L + 1).toInt
     val numPartitions: Int = Math.min(numTumorPartitions, maxPartitions)
