@@ -458,8 +458,15 @@ object SimpleSomaticVariantCaller extends Command {
                    minNormalCoverage: Int = 10,
                    minTumorCoverage: Int = 10): RDD[ADAMGenotype] = {
 
+
     Common.progress("Entered callVariants")
-    val broadcastIndex = tumorReads.context.broadcast(reference.index)
+
+    val sc = tumorReads.context
+    def force(rdd : RDD[_]) = {
+      sc.runJob(rdd, (iter: Iterator[_]) => {})
+    }
+
+    val broadcastIndex = sc.broadcast(reference.index)
     Common.progress("Broadcast reference index")
 
     val pileupBuilder = PileupBuilder(broadcastIndex, tumorReads)
@@ -467,17 +474,19 @@ object SimpleSomaticVariantCaller extends Command {
 
     var normalPileups: RDD[(Long, Pileup)] =
       pileupBuilder.buildPileups(normalReads, minBaseQuality, minNormalCoverage)
-
+    force(normalPileups)
     Common.progress("-- Normal pileups: %s with %d partitions".format(
       normalPileups.getClass, normalPileups.partitions.size))
 
     var tumorPileups: RDD[(Long, Pileup)] =
       pileupBuilder.buildPileups(tumorReads, minBaseQuality, minNormalCoverage)
+    force(tumorPileups)
 
     Common.progress("-- Tumor pileups: %s with %d partitions".format(
       tumorPileups.getClass, tumorPileups.partitions.size))
 
-    val referenceBases = reference.basesAtGlobalPositions.partitionBy(pileupBuilder.partitioner)
+    val referenceBases = reference.basesAtGlobalPositions.partitionBy(pileupBuilder.partitioner).cache()
+    force(referenceBases)
 
     Common.progress("-- Reference bases: %s with %d partitions".format(
       referenceBases.getClass, referenceBases.partitions.size))

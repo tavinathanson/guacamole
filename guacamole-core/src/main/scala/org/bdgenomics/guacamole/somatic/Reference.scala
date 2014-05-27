@@ -195,6 +195,6 @@ object Reference {
     val (referenceLines, contigSizes) = loadReferenceLines(path, sc)
     val index = Index(contigSizes)
     val bases = referenceLines.flatMap({ case (locus, bytes) => bytes.map((c: Byte) => (locus, c)) })
-    Reference(bases.cache(), index)
+    Reference(bases, index)
   }
 }
