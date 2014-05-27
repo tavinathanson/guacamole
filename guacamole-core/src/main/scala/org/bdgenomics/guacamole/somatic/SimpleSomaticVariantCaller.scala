@@ -171,20 +171,20 @@ object SimpleSomaticVariantCaller extends Command {
    * @param maxIndex
    * @tparam V
    */
-  case class UniformLongPartitioner[V: ClassTag](partitions: Int, maxIndex: Long) extends Partitioner {
+  class UniformLongPartitioner[V: ClassTag](partitions: Int, maxIndex: Long) extends Partitioner {
 
-    val elementsPerPartition: Long = (maxIndex / partitions.toLong) + 1
+    val elementsPerPartition: Long = (this.maxIndex / this.partitions.toLong) + 1
 
     def numPartitions = partitions
 
     def getPartition(key: Any): Int = {
       val idx = key.asInstanceOf[Long]
-      Math.min((idx / elementsPerPartition).toInt, partitions - 1)
+      Math.min((idx / elementsPerPartition).toInt, this.partitions - 1)
     }
 
     override def equals(other: Any): Boolean = other match {
       case r: UniformLongPartitioner[_] =>
-        r.maxIndex == maxIndex && r.numPartitions == numPartitions
+        r.elementsPerPartition == this.elementsPerPartition && r.numPartitions == this.numPartitions
       case _ =>
         false
     }
@@ -197,7 +197,7 @@ object SimpleSomaticVariantCaller extends Command {
     val maxIndex = rdd.map(read => read.end).reduce(Math.max _)
     val rddPartitions = rdd.partitions.size
     val numPartitions: Int = Math.min(rddPartitions, maxPartitions)
-    val partitioner: Partitioner = UniformLongPartitioner(numPartitions, maxIndex)
+    val partitioner: Partitioner = new UniformLongPartitioner(numPartitions, maxIndex)
 
     /**
      * Expand a collection of ADAMRecords into an RDD that's keyed by chrosomosomal positions,
