@@ -190,34 +190,32 @@ object SimpleSomaticVariantCaller extends Command {
     }
   }
 
-  case class PileupBuilder(val referenceIndex: Broadcast[Reference.Index],
-                           @transient rdd: RDD[SimpleRead]) {
-
-    val maxPartitions = (referenceIndex.value.numLoci / 10000L + 1).toInt
-    val rddPartitions = rdd.partitions.size
-    val numPartitions: Int = Math.min(rddPartitions, maxPartitions)
-    val partitioner: Partitioner = new RangePartitioner(numPartitions, rdd.keyBy({
-      read => referenceIndex.value.locusToGlobalPosition( (read.referenceContig, read.start) ) }))
-
-        /**
-     * Expand a collection of ADAMRecords into an RDD that's keyed by chrosomosomal positions,
-     * whose values are a collection of BaseReads at that position.
-     *
-     * @param reads Aligned reads
-     * @param minBaseQuality Discard bases whose read quality falls below this threshold.
-     * @param minDepth Discard pileups of size smaller than this parameter.
-     * @return RDD of position, pileup pairs
-     */
-    def buildPileups(reads: RDD[SimpleRead],
-                     minBaseQuality: Int = 0,
-                     minDepth: Int = 0): RDD[(Long, Pileup)] = {
-      var baseReadsAtPos: RDD[(Long, BaseRead)] = reads.flatMap(expandBaseReads(_, referenceIndex, minBaseQuality))
-      baseReadsAtPos = baseReadsAtPos.partitionBy(partitioner)
-      var pileups = baseReadsAtPos.groupByKey()
-      if (minDepth > 0) { pileups = pileups.filter(_._2.length >= minDepth) }
-      pileups
+  /**
+   * Expand a collection of ADAMRecords into an RDD that's keyed by chrosomosomal positions,
+   * whose values are a collection of BaseReads at that position.
+   *
+   * @param reads Aligned reads
+   * @param minBaseQuality Discard bases whose read quality falls below this threshold.
+   * @param minDepth Discard pileups of size smaller than this parameter.
+   * @param partitioner
+   * @return RDD of position, pileup pairs
+   */
+  def buildPileups(reads: RDD[SimpleRead],
+                   broadcastIndex : Broadcast[Reference.Index],
+                   minBaseQuality: Int = 0,
+                   minDepth: Int = 0,
+                   partitioner : Option[Partitioner] = None): RDD[(Long, Pileup)] = {
+    var baseReadsAtPos: RDD[(Long, BaseRead)] = reads.flatMap(expandBaseReads(_, broadcastIndex, minBaseQuality))
+    baseReadsAtPos = partitioner match {
+      case Some(p) => baseReadsAtPos.partitionBy(p)
+      case None => baseReadsAtPos
     }
+    var pileups = baseReadsAtPos.groupByKey()
+    if (minDepth > 0) { pileups = pileups.filter(_._2.length >= minDepth) }
+    pileups
   }
+
+
   /**
    *  Create a simple BaseRead object from the CIGAR operator and other information about a read at a
    *  given position `readPos`.
@@ -458,39 +456,45 @@ object SimpleSomaticVariantCaller extends Command {
                    minNormalCoverage: Int = 10,
                    minTumorCoverage: Int = 10): RDD[ADAMGenotype] = {
 
-
     Common.progress("Entered callVariants")
 
     val sc = tumorReads.context
-    def force(rdd : RDD[_]) = {
-      sc.runJob(rdd, (iter: Iterator[_]) => {})
+    val referenceIndex = reference.index
+    val broadcastIndex = sc.broadcast(referenceIndex)
+    Common.progress("Broadcast reference")
+
+    def readKey(read : SimpleRead) = {
+      val contig = read.referenceContig
+      val offset = (read.start + read.end) / 2L
+      broadcastIndex.value.locusToGlobalPosition( (contig, offset) )
     }
+    val tumorKeyed = tumorReads.keyBy(readKey _)
+    val normalKeyed = normalReads.keyBy(readKey _)
+    Common.progress("Keyed reads")
 
-    val broadcastIndex = sc.broadcast(reference.index)
-    Common.progress("Broadcast reference index")
 
-    val pileupBuilder = PileupBuilder(broadcastIndex, tumorReads)
-    Common.progress("Constructed pileup builder")
+    val maxPartitions = (referenceIndex.numLoci / 10000L + 1).toInt
+    val tumorPartitions = tumorReads.partitions.size
+    val numPartitions: Int = Math.min(tumorPartitions, maxPartitions)
+    val partitioner: Partitioner = new RangePartitioner(numPartitions, tumorKeyed)
 
-    var normalPileups: RDD[(Long, Pileup)] =
-      pileupBuilder.buildPileups(normalReads, minBaseQuality, minNormalCoverage)
-    force(normalPileups)
-    Common.progress("-- Normal pileups: %s with %d partitions".format(
-      normalPileups.getClass, normalPileups.partitions.size))
+    val tumorReadsPartitioned : RDD[SimpleRead] = tumorKeyed.partitionBy(partitioner).values
+    val normalReadsPartitioned : RDD[SimpleRead] = normalKeyed.partitionBy(partitioner).values
 
-    var tumorPileups: RDD[(Long, Pileup)] =
-      pileupBuilder.buildPileups(tumorReads, minBaseQuality, minNormalCoverage)
-    force(tumorPileups)
-
+    val tumorPileups = buildPileups(tumorReadsPartitioned, broadcastIndex, minBaseQuality, minTumorCoverage, Some(partitioner))
     Common.progress("-- Tumor pileups: %s with %d partitions".format(
       tumorPileups.getClass, tumorPileups.partitions.size))
 
-    val referenceBases = reference.basesAtGlobalPositions.partitionBy(pileupBuilder.partitioner).cache()
-    force(referenceBases)
+    val normalPileups = buildPileups(normalReadsPartitioned, broadcastIndex, minBaseQuality, minNormalCoverage, Some(partitioner))
+    Common.progress("-- Normal pileups: %s with %d partitions".format(
+      normalPileups.getClass, normalPileups.partitions.size))
 
-    Common.progress("-- Reference bases: %s with %d partitions".format(
-      referenceBases.getClass, referenceBases.partitions.size))
-
+    val referenceBases = reference.basesAtGlobalPositions.partitionBy(partitioner)
+    Common.progress("partitioned reference")
+    for (i <- 0 to Math.min(2, normalPileups.partitions.size - 1)) {
+      val part = normalPileups.partitions(i)
+      println("Preferred location of partition %s #%d = %s".format(part, i, normalPileups.preferredLocations(part)))
+    }
     val tumorNormalRef: RDD[(Long, (Pileup, Pileup, Byte))] =
       new ZipJoinRDD3(tumorPileups, normalPileups, referenceBases)
 
