@@ -11,15 +11,20 @@ import scala.collection.mutable
 import org.bdgenomics.guacamole.{ LociMapLongSingleContigSerializer, LociMap, Common }
 import com.esotericsoftware.kryo.{ KryoSerializable, Kryo, Serializer }
 import com.esotericsoftware.kryo.io.{ Input, Output }
+import org.apache.spark.broadcast.Broadcast
 
-case class Reference(basesAtLoci: RDD[(Reference.Locus, Byte)],
+case class Reference(@transient basesAtLoci: RDD[(Reference.Locus, Byte)],
                      index: Reference.Index) {
-  val basesAtGlobalPositions: RDD[(Long, Byte)] =
-    basesAtLoci.map({
+  val broadcastIndex = basesAtLoci.context.broadcast(index)
+  val basesAtGlobalPositions: RDD[(Long, Byte)] = {
+    // prevent serialization
+    val localBroadcastIndex = broadcastIndex
+    basesAtLoci.cache().map({
       case (locus, nucleotide) =>
-        val position: Long = index.locusToGlobalPosition(locus)
+        val position: Long = localBroadcastIndex.value.locusToGlobalPosition(locus)
         (position, nucleotide)
-    })
+    }).cache()
+  }
 }
 
 object Reference {

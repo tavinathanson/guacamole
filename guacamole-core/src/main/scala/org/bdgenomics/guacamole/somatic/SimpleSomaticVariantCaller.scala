@@ -320,10 +320,8 @@ object SimpleSomaticVariantCaller extends Command {
               val locus = (contig, refPos)
               val position: Long = referenceIndex.value.locusToGlobalPosition(locus)
               result += ((position, baseRead))
-
             }
         }
-
         if (cigarOp.consumesReferenceBases) { refPos += 1 }
         if (cigarOp.consumesReadBases) { readPos += 1 }
       }
