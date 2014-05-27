@@ -30,10 +30,10 @@ case class SimpleRead(
   referenceContig: String,
   baseQualities: Array[Byte],
   alignmentQuality: Int,
-  start: Int,
-  end: Int,
-  unclippedStart: Int,
-  unclippedEnd: Int,
+  start: Long,
+  end: Long,
+  unclippedStart: Long,
+  unclippedEnd: Long,
   cigar: net.sf.samtools.Cigar,
   isMapped: Boolean,
   isDuplicate: Boolean)
@@ -59,17 +59,16 @@ object SimpleRead {
     val end = record.getAlignmentEnd - 1
     val unclippedStart = record.getUnclippedStart - 1
     val unclippedEnd = record.getUnclippedEnd - 1
-    val cigar = record.getCigar
     SimpleRead(
       baseSequence = record.getReadString.getBytes,
       referenceContig = Reference.normalizeContigName(record.getReferenceName),
       baseQualities = record.getBaseQualities,
       alignmentQuality = record.getMappingQuality,
-      start = start,
-      end = end,
-      unclippedStart = unclippedStart,
-      unclippedEnd = unclippedEnd,
-      cigar = cigar,
+      start = start.toLong,
+      end = end.toLong,
+      unclippedStart = unclippedStart.toLong,
+      unclippedEnd = unclippedEnd.toLong,
+      cigar = record.getCigar,
       isMapped = isMapped,
       isDuplicate = isDuplicate)
   }

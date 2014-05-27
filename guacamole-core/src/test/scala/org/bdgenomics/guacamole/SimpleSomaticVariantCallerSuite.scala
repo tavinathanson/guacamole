@@ -53,8 +53,8 @@ class SimpleSomaticVariantCallerSuite extends TestUtil.SparkFunSuite with Should
 
   sparkTest("No repeated positions in pileup RDD") {
     val normalReads = loadReads("same_start_reads.sam")
-    val normalPileups: RDD[(Long, SimpleSomaticVariantCaller.Pileup)] =
-      SimpleSomaticVariantCaller.buildPileups(normalReads, sc.broadcast(sameStartIndex))
+    val pileupBuilder = SimpleSomaticVariantCaller.PileupBuilder(sc.broadcast(sameStartIndex), normalReads)
+    val normalPileups: RDD[(Long, SimpleSomaticVariantCaller.Pileup)] = pileupBuilder.buildPileups(normalReads)
     var seenPositions = Set[Long]()
     for ((pos, _) <- normalPileups.collect) {
       assert(!seenPositions.contains(pos), "Multiple RDD entries for position " + pos.toString)
