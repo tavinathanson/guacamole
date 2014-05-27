@@ -194,12 +194,12 @@ object SimpleSomaticVariantCaller extends Command {
                            @transient rdd: RDD[SimpleRead]) {
 
     val maxPartitions = (referenceIndex.value.numLoci / 10000L + 1).toInt
-    val maxIndex = rdd.map(read => read.end).reduce(Math.max _)
     val rddPartitions = rdd.partitions.size
     val numPartitions: Int = Math.min(rddPartitions, maxPartitions)
-    val partitioner: Partitioner = new UniformLongPartitioner(numPartitions, maxIndex)
+    val partitioner: Partitioner = new RangePartitioner(numPartitions, rdd.keyBy({
+      read => referenceIndex.value.locusToGlobalPosition( (read.referenceContig, read.start) ) }))
 
-    /**
+        /**
      * Expand a collection of ADAMRecords into an RDD that's keyed by chrosomosomal positions,
      * whose values are a collection of BaseReads at that position.
      *
