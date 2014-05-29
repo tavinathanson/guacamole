@@ -213,6 +213,7 @@ object SimpleSomaticVariantCaller extends Command {
     var pileups = baseReadsAtPos.groupByKey()
     if (minDepth > 0) { pileups = pileups.filter(_._2.length >= minDepth) }
     pileups
+
   }
 
 
@@ -304,15 +305,22 @@ object SimpleSomaticVariantCaller extends Command {
     var refPos: Long = record.unclippedStart
     assume(refPos >= 0, "Expected non-negative unclipped start, got %d".format(refPos))
     var readPos = 0
-    val result = mutable.MutableList[(Long, BaseRead)]()
+    val result = mutable.ListBuffer[(Long, BaseRead)]()
     val baseSequence: Array[Byte] = record.baseSequence
     val qualityScores: Array[Byte] = record.baseQualities
     val contig = record.referenceContig
     val cigar: net.sf.samtools.Cigar = record.cigar
-    for (cigarElt <- cigar.getCigarElements) {
+    var cigarIdx = 0
+    val numCigarElements = cigar.numCigarElements
+    val cigarElts = cigar.getCigarElements
+    while (cigarIdx < numCigarElements)  {
+      val cigarElt = cigarElts(cigarIdx)
       val cigarOp = cigarElt.getOperator
+      var length = cigarElt.getLength
+      cigarElt.getLength
+      var i = 1
       // emit one BaseRead per position in the cigar element
-      for (i <- 1 to cigarElt.getLength) {
+      while (i < length) {
         makeBaseReads(cigarOp, refPos, readPos, baseSequence, qualityScores, alignmentQuality) match {
           case None => ()
           case Some(baseRead) =>
@@ -324,7 +332,9 @@ object SimpleSomaticVariantCaller extends Command {
         }
         if (cigarOp.consumesReferenceBases) { refPos += 1 }
         if (cigarOp.consumesReadBases) { readPos += 1 }
+        i += 1
       }
+      cigarIdx += 1
     }
     result
   }
@@ -398,19 +408,19 @@ object SimpleSomaticVariantCaller extends Command {
    * @param percentileRank
    * @return
    */
-  def topBases(pileup: Pileup, percentileRank: Int): Set[Option[Byte]] = {
+  def topBases(pileup: Pileup, percentileRank: Int): List[Option[Byte]] = {
     val total = pileup.length
     val sortedCounts: List[(Option[Byte], Int)] = baseCounts(pileup)
-    val result = mutable.MutableList[Option[Byte]]()
+    val result = mutable.ListBuffer[Option[Byte]]()
     var cumulative = 0
     for ((alignment, count) <- sortedCounts) {
       cumulative += count
       result += alignment
       if (((100 * cumulative) / total) >= percentileRank) {
-        return result.toSet
+        return result.toList
       }
     }
-    return result.toSet
+    return result.toList
   }
 
   /**
@@ -426,7 +436,7 @@ object SimpleSomaticVariantCaller extends Command {
                           normalPileup: Pileup,
                           ref: Byte): Option[ADAMGenotype] = {
     // which matched bases, insertions, and deletions, cover 90% of the reads?
-    val normalBases: Set[Option[Byte]] = topBases(normalPileup, 90)
+    val normalBases: List[Option[Byte]] = topBases(normalPileup, 90)
     val tumorBaseCounts = baseCounts(tumorPileup)
     val (tumorMaxAlignment, _) = tumorBaseCounts.maxBy(_._2)
     if (normalBases.contains(tumorMaxAlignment)) { return None }
@@ -470,11 +480,64 @@ object SimpleSomaticVariantCaller extends Command {
     val normalKeyed = normalReads.keyBy(readKey _)
     Common.progress("Keyed reads")
 
-
     val maxPartitions = (referenceIndex.numLoci / 10000L + 1).toInt
     val tumorPartitions = tumorReads.partitions.size
     val numPartitions: Int = Math.min(tumorPartitions, maxPartitions)
     val partitioner: Partitioner = new RangePartitioner(numPartitions, tumorKeyed)
+
+    val tumorBases =
+      tumorReads.flatMap(expandBaseReads(_, broadcastIndex, minBaseQuality)).mapValues(read => ( 't', read)).cache()
+
+    Common.progress("Tumor bases: %s with %d partitions, %d elements".format(
+      tumorBases.getClass,
+      tumorBases.partitions.size,
+      tumorBases.count))
+    val normalBases =
+      normalReads.flatMap(expandBaseReads(_, broadcastIndex, minBaseQuality)).mapValues(read => ( 'n', read)).cache()
+
+
+    Common.progress("Normal bases: %s with %d partitions, %d elements".format(
+      normalBases.getClass,
+      normalBases.partitions.size,
+      normalBases.count))
+
+    val tumorNormalUnion = tumorBases.union(normalBases)
+
+    val tumorNormalJoined : RDD[(Long, (Pileup, Pileup))] = tumorNormalUnion.groupByKey(partitioner).mapValues {
+      case bases =>
+        val fromTumor = mutable.ListBuffer[BaseRead]()
+        val fromNormal = mutable.ListBuffer[BaseRead]()
+        for ( (tag, base)  <- bases) {
+         if (tag == 't') {
+            fromTumor += base
+          } else {
+            fromNormal += base
+          }
+        }
+        (fromTumor.toList, fromNormal.toList)
+    }
+    val tumorNormalFiltered = tumorNormalJoined.filter {case (_, (t, n)) =>
+       t.length >= minTumorCoverage && n.length >= minNormalCoverage
+    }
+    val tumorNormalRef = tumorNormalFiltered.join(reference.basesAtGlobalPositions).map({case (k, ((v1, v2), v3)) =>
+      (k, (v1, v2, v3))
+    }).cache()
+
+    Common.progress("Tumor-normal-ref joined %s with %d partitions and %d elements".format(
+      tumorNormalRef.getClass,
+      tumorNormalRef.partitions.size,
+      tumorNormalRef.count))
+
+    /*
+    def readKey(read : SimpleRead) = {
+      val contig = read.referenceContig
+      val offset = (read.start + read.end) / 2L
+      broadcastIndex.value.locusToGlobalPosition( (contig, offset) )
+    }
+    val tumorKeyed = tumorReads.keyBy(readKey _)
+    val normalKeyed = normalReads.keyBy(readKey _)
+    Common.progress("Keyed reads")
+
 
     val tumorReadsPartitioned : RDD[SimpleRead] = tumorKeyed.partitionBy(partitioner).values
     val normalReadsPartitioned : RDD[SimpleRead] = normalKeyed.partitionBy(partitioner).values
@@ -495,9 +558,7 @@ object SimpleSomaticVariantCaller extends Command {
     }
     val tumorNormalRef: RDD[(Long, (Pileup, Pileup, Byte))] =
       new ZipJoinRDD3(tumorPileups, normalPileups, referenceBases)
-
-    Common.progress("Joined tumor+normal+reference genome: %s with %d partitions (deps = %s)".format(
-      tumorNormalRef.getClass, tumorNormalRef.partitions.size, tumorNormalRef.dependencies))
+    */
 
     val genotypes: RDD[ADAMGenotype] = tumorNormalRef.flatMap({
       case (globalPosition, (tumorPileup, normalPileup, ref)) =>
