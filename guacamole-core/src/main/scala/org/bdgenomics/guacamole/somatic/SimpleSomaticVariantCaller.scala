@@ -536,7 +536,6 @@ object SimpleSomaticVariantCaller extends Command {
     val numPartitions: Int = Math.min(10 * tumorPartitions, maxPartitions)
     val partitioner: Partitioner = new RangePartitioner(numPartitions, tumorKeyed)
 
-    tumorKeyed.groupBy()
     val tumorReadsPartitioned : RDD[SimpleRead] = tumorKeyed.partitionBy(partitioner).values
 
     Common.progress("Tumor reads partitioned: %s with %d partitions and %d elements".format(
