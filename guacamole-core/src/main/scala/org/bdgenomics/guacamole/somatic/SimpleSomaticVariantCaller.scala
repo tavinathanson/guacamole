@@ -297,7 +297,7 @@ object SimpleSomaticVariantCaller extends Command {
    * @param record Single short-read (contains multiple bases)
    * @return Sequence of bases contained in input
    */
-  def expandBaseReads(record: SimpleRead, referenceIndex: Broadcast[Reference.Index], minBaseQuality: Int = 0): Seq[(Long, BaseRead)] = {
+  def expandBaseReads(record: SimpleRead, referenceIndex: Broadcast[Reference.Index], minBaseQuality: Int = 0): Iterator[(Long, BaseRead)] = {
     //val startTime = System.nanoTime
     val alignmentQuality = record.alignmentQuality
     assume(alignmentQuality >= 0, "Expected non-negative alignment quality, got %d".format(alignmentQuality))
@@ -339,7 +339,7 @@ object SimpleSomaticVariantCaller extends Command {
     }
     //val stopTime = System.nanoTime
     //println("Expanded %s in %d microseconds".format(record, (stopTime - startTime) / 1000))
-    result.toSeq
+    result.iterator
   }
 
   /**
@@ -454,6 +454,53 @@ object SimpleSomaticVariantCaller extends Command {
     }
   }
 
+  def expandFlatMap( iter : Iterator[SimpleRead], broadcastIndex : Broadcast[Reference.Index], minBaseQuality : Int ) = {
+    val accumulator = mutable.ArrayBuffer[(Long, BaseRead)]()
+    while (iter.hasNext) {
+      val record : SimpleRead = iter.next
+      val alignmentQuality = record.alignmentQuality
+      assume(alignmentQuality >= 0, "Expected non-negative alignment quality, got %d".format(alignmentQuality))
+      // using unclipped start since we're considering
+      // soft clipping as one of the possible CIGAR operators
+      // in makeBaseReads (which returns None for clipped positions)
+      var refPos: Long = record.unclippedStart
+      assume(refPos >= 0, "Expected non-negative unclipped start, got %d".format(refPos))
+      var readPos = 0
+      val result = mutable.ArrayBuffer[(Long, BaseRead)]() // mutable.MutableList[(Long, BaseRead)]()
+      val baseSequence: Array[Byte] = record.baseSequence
+      val qualityScores: Array[Byte] = record.baseQualities
+      val contig = record.referenceContig
+      val cigar: net.sf.samtools.Cigar = record.cigar
+      var cigarIdx = 0
+      val numCigarElements = cigar.numCigarElements
+      val cigarElts = cigar.getCigarElements
+      while (cigarIdx < numCigarElements)  {
+        val cigarElt = cigarElts(cigarIdx)
+        val cigarOp = cigarElt.getOperator
+        var length = cigarElt.getLength
+        cigarElt.getLength
+        var i = 1
+        // emit one BaseRead per position in the cigar element
+        while (i < length) {
+          val baseReadOpt = makeBaseReads(cigarOp, refPos, readPos, baseSequence, qualityScores, alignmentQuality)
+          if (baseReadOpt.isDefined) {
+            val baseRead = baseReadOpt.get
+            if (baseRead.readQuality.isDefined && baseRead.readQuality.get >= minBaseQuality) {
+              val position: Long =  broadcastIndex.value.contigStart.getOrElse(contig, 0L) + refPos
+              accumulator += ((position, baseRead))
+            }
+          }
+          if (cigarOp.consumesReferenceBases) { refPos += 1 }
+          if (cigarOp.consumesReadBases) { readPos += 1 }
+          i += 1
+        }
+        cigarIdx += 1
+      }
+    }
+    accumulator.iterator
+
+  }
+
   /**
    *
    * @param normalReads Unsorted collection of ADAMRecords representing short reads from normal tissue.
@@ -485,7 +532,7 @@ object SimpleSomaticVariantCaller extends Command {
 
     val maxPartitions = (referenceIndex.numLoci / 10000L + 1).toInt
     val tumorPartitions = tumorReads.partitions.size
-    val numPartitions: Int = Math.min(tumorPartitions, maxPartitions)
+    val numPartitions: Int = Math.min(10 * tumorPartitions, maxPartitions)
     val partitioner: Partitioner = new RangePartitioner(numPartitions, tumorKeyed)
 
     val tumorReadsPartitioned : RDD[SimpleRead] = tumorKeyed.partitionBy(partitioner).values
@@ -501,9 +548,8 @@ object SimpleSomaticVariantCaller extends Command {
       normalReadsPartitioned.count
     ))
 
-
     val tumorBases =
-      tumorReadsPartitioned.flatMap(expandBaseReads(_, broadcastIndex, minBaseQuality))
+      tumorReadsPartitioned.mapPartitions(expandFlatMap(_, broadcastIndex, minBaseQuality))
 
     Common.progress("Tumor bases: %s with %d partitions, %d elements".format(
       tumorBases.getClass,
