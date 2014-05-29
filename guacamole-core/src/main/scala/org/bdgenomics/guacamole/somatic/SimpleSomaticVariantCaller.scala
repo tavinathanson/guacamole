@@ -37,6 +37,7 @@ import scala.reflect.ClassTag
 import java.io.{ ObjectOutputStream, IOException }
 import scala.Some
 import org.apache.spark.broadcast.Broadcast
+import org.apache.commons.logging.impl.Log4JLogger
 
 /**
  * Simple somatic variant caller implementation.
@@ -297,6 +298,7 @@ object SimpleSomaticVariantCaller extends Command {
    * @return Sequence of bases contained in input
    */
   def expandBaseReads(record: SimpleRead, referenceIndex: Broadcast[Reference.Index], minBaseQuality: Int = 0): Seq[(Long, BaseRead)] = {
+    val startTime = System.nanoTime
     val alignmentQuality = record.alignmentQuality
     assume(alignmentQuality >= 0, "Expected non-negative alignment quality, got %d".format(alignmentQuality))
     // using unclipped start since we're considering
@@ -336,6 +338,8 @@ object SimpleSomaticVariantCaller extends Command {
       }
       cigarIdx += 1
     }
+    val stopTime = System.nanoTime
+    println("Expanded %s in %d microseconds".format(record, (stopTime - startTime) / 1000))
     result
   }
 
@@ -485,23 +489,51 @@ object SimpleSomaticVariantCaller extends Command {
     val numPartitions: Int = Math.min(tumorPartitions, maxPartitions)
     val partitioner: Partitioner = new RangePartitioner(numPartitions, tumorKeyed)
 
+    val tumorReadsPartitioned : RDD[SimpleRead] = tumorKeyed.partitionBy(partitioner).values
+    Common.progress("Tumor reads partitioned: %s with %d partitions and %d elements".format(
+      tumorReadsPartitioned.getClass,
+      tumorReadsPartitioned.partitions.size,
+      tumorReadsPartitioned.count
+    ))
+    val normalReadsPartitioned : RDD[SimpleRead] = normalKeyed.partitionBy(partitioner).values
+    Common.progress("Normal reads partitioned: %s with %d partitions and %d elements".format(
+      normalReadsPartitioned.getClass,
+      normalReadsPartitioned.partitions.size,
+      normalReadsPartitioned.count
+    ))
+
+
     val tumorBases =
-      tumorReads.flatMap(expandBaseReads(_, broadcastIndex, minBaseQuality)).mapValues(read => ( 't', read)).cache()
+      tumorReadsPartitioned.flatMap(expandBaseReads(_, broadcastIndex, minBaseQuality))
 
     Common.progress("Tumor bases: %s with %d partitions, %d elements".format(
       tumorBases.getClass,
       tumorBases.partitions.size,
       tumorBases.count))
-    val normalBases =
-      normalReads.flatMap(expandBaseReads(_, broadcastIndex, minBaseQuality)).mapValues(read => ( 'n', read)).cache()
 
+    val taggedTumorBases = tumorBases.mapValues(read => ( 't', read))
+    Common.progress("Tagged bases: %s with %d partitions, %d elements".format(
+      taggedTumorBases.getClass,
+      taggedTumorBases.partitions.size,
+      taggedTumorBases.count))
+
+
+    val normalBases =
+      normalReadsPartitioned.flatMap(expandBaseReads(_, broadcastIndex, minBaseQuality))
 
     Common.progress("Normal bases: %s with %d partitions, %d elements".format(
       normalBases.getClass,
       normalBases.partitions.size,
       normalBases.count))
+    val taggedNormalBases = normalBases.mapValues(read => ( 'n', read)).cache()
 
-    val tumorNormalUnion = tumorBases.union(normalBases)
+    Common.progress("Tagged normal bases: %s with %d partitions, %d elements".format(
+      taggedNormalBases.getClass,
+      taggedNormalBases.partitions.size,
+      taggedNormalBases.count))
+
+
+    val tumorNormalUnion = taggedTumorBases.union(taggedNormalBases)
 
     val tumorNormalJoined : RDD[(Long, (Pileup, Pileup))] = tumorNormalUnion.groupByKey(partitioner).mapValues {
       case bases =>
@@ -539,8 +571,6 @@ object SimpleSomaticVariantCaller extends Command {
     Common.progress("Keyed reads")
 
 
-    val tumorReadsPartitioned : RDD[SimpleRead] = tumorKeyed.partitionBy(partitioner).values
-    val normalReadsPartitioned : RDD[SimpleRead] = normalKeyed.partitionBy(partitioner).values
 
     val tumorPileups = buildPileups(tumorReadsPartitioned, broadcastIndex, minBaseQuality, minTumorCoverage, Some(partitioner))
     Common.progress("-- Tumor pileups: %s with %d partitions".format(
