@@ -528,6 +528,7 @@ object SimpleSomaticVariantCaller extends Command {
     }
     val tumorKeyed = tumorReads.keyBy(readKey _)
     val normalKeyed = normalReads.keyBy(readKey _)
+
     Common.progress("Keyed reads")
 
     val maxPartitions = (referenceIndex.numLoci / 10000L + 1).toInt
@@ -535,13 +536,16 @@ object SimpleSomaticVariantCaller extends Command {
     val numPartitions: Int = Math.min(10 * tumorPartitions, maxPartitions)
     val partitioner: Partitioner = new RangePartitioner(numPartitions, tumorKeyed)
 
+    tumorKeyed.groupBy()
     val tumorReadsPartitioned : RDD[SimpleRead] = tumorKeyed.partitionBy(partitioner).values
+
     Common.progress("Tumor reads partitioned: %s with %d partitions and %d elements".format(
       tumorReadsPartitioned.getClass,
       tumorReadsPartitioned.partitions.size,
       tumorReadsPartitioned.count
     ))
     val normalReadsPartitioned : RDD[SimpleRead] = normalKeyed.partitionBy(partitioner).values
+
     Common.progress("Normal reads partitioned: %s with %d partitions and %d elements".format(
       normalReadsPartitioned.getClass,
       normalReadsPartitioned.partitions.size,
@@ -557,6 +561,7 @@ object SimpleSomaticVariantCaller extends Command {
       tumorBases.count))
 
     val taggedTumorBases = tumorBases.mapValues(read => ( 't', read))
+
     Common.progress("Tagged bases: %s with %d partitions, %d elements".format(
       taggedTumorBases.getClass,
       taggedTumorBases.partitions.size,
@@ -582,8 +587,8 @@ object SimpleSomaticVariantCaller extends Command {
 
     val tumorNormalJoined : RDD[(Long, (Pileup, Pileup))] = tumorNormalUnion.groupByKey(partitioner).mapValues {
       case bases =>
-        val fromTumor = mutable.ListBuffer[BaseRead]()
-        val fromNormal = mutable.ListBuffer[BaseRead]()
+        val fromTumor = mutable.ArrayBuffer[BaseRead]()
+        val fromNormal = mutable.ArrayBuffer[BaseRead]()
         for ( (tag, base)  <- bases) {
          if (tag == 't') {
             fromTumor += base
@@ -591,7 +596,7 @@ object SimpleSomaticVariantCaller extends Command {
             fromNormal += base
           }
         }
-        (fromTumor.toList, fromNormal.toList)
+        (fromTumor, fromNormal)
     }
     val tumorNormalFiltered = tumorNormalJoined.filter {case (_, (t, n)) =>
        t.length >= minTumorCoverage && n.length >= minNormalCoverage
@@ -604,36 +609,6 @@ object SimpleSomaticVariantCaller extends Command {
       tumorNormalRef.getClass,
       tumorNormalRef.partitions.size,
       tumorNormalRef.count))
-
-    /*
-    def readKey(read : SimpleRead) = {
-      val contig = read.referenceContig
-      val offset = (read.start + read.end) / 2L
-      broadcastIndex.value.locusToGlobalPosition( (contig, offset) )
-    }
-    val tumorKeyed = tumorReads.keyBy(readKey _)
-    val normalKeyed = normalReads.keyBy(readKey _)
-    Common.progress("Keyed reads")
-
-
-
-    val tumorPileups = buildPileups(tumorReadsPartitioned, broadcastIndex, minBaseQuality, minTumorCoverage, Some(partitioner))
-    Common.progress("-- Tumor pileups: %s with %d partitions".format(
-      tumorPileups.getClass, tumorPileups.partitions.size))
-
-    val normalPileups = buildPileups(normalReadsPartitioned, broadcastIndex, minBaseQuality, minNormalCoverage, Some(partitioner))
-    Common.progress("-- Normal pileups: %s with %d partitions".format(
-      normalPileups.getClass, normalPileups.partitions.size))
-
-    val referenceBases = reference.basesAtGlobalPositions.partitionBy(partitioner)
-    Common.progress("partitioned reference")
-    for (i <- 0 to Math.min(2, normalPileups.partitions.size - 1)) {
-      val part = normalPileups.partitions(i)
-      println("Preferred location of partition %s #%d = %s".format(part, i, normalPileups.preferredLocations(part)))
-    }
-    val tumorNormalRef: RDD[(Long, (Pileup, Pileup, Byte))] =
-      new ZipJoinRDD3(tumorPileups, normalPileups, referenceBases)
-    */
 
     val genotypes: RDD[ADAMGenotype] = tumorNormalRef.flatMap({
       case (globalPosition, (tumorPileup, normalPileup, ref)) =>
