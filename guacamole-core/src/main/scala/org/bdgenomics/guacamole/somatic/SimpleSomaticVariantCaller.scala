@@ -298,7 +298,7 @@ object SimpleSomaticVariantCaller extends Command {
    * @return Sequence of bases contained in input
    */
   def expandBaseReads(record: SimpleRead, referenceIndex: Broadcast[Reference.Index], minBaseQuality: Int = 0): Seq[(Long, BaseRead)] = {
-    val startTime = System.nanoTime
+    //val startTime = System.nanoTime
     val alignmentQuality = record.alignmentQuality
     assume(alignmentQuality >= 0, "Expected non-negative alignment quality, got %d".format(alignmentQuality))
     // using unclipped start since we're considering
@@ -307,7 +307,7 @@ object SimpleSomaticVariantCaller extends Command {
     var refPos: Long = record.unclippedStart
     assume(refPos >= 0, "Expected non-negative unclipped start, got %d".format(refPos))
     var readPos = 0
-    val result = mutable.ListBuffer[(Long, BaseRead)]()
+    val result = mutable.ArrayBuffer[(Long, BaseRead)]() // mutable.MutableList[(Long, BaseRead)]()
     val baseSequence: Array[Byte] = record.baseSequence
     val qualityScores: Array[Byte] = record.baseQualities
     val contig = record.referenceContig
@@ -323,14 +323,13 @@ object SimpleSomaticVariantCaller extends Command {
       var i = 1
       // emit one BaseRead per position in the cigar element
       while (i < length) {
-        makeBaseReads(cigarOp, refPos, readPos, baseSequence, qualityScores, alignmentQuality) match {
-          case None => ()
-          case Some(baseRead) =>
-            if (baseRead.readQuality.isDefined && baseRead.readQuality.get >= minBaseQuality) {
-              val locus = (contig, refPos)
-              val position: Long = referenceIndex.value.locusToGlobalPosition(locus)
-              result += ((position, baseRead))
-            }
+        val baseReadOpt = makeBaseReads(cigarOp, refPos, readPos, baseSequence, qualityScores, alignmentQuality)
+        if (baseReadOpt.isDefined) {
+          val baseRead = baseReadOpt.get
+          if (baseRead.readQuality.isDefined && baseRead.readQuality.get >= minBaseQuality) {
+            val position: Long =  referenceIndex.value.contigStart.getOrElse(contig, 0L) + refPos
+            result += ((position, baseRead))
+          }
         }
         if (cigarOp.consumesReferenceBases) { refPos += 1 }
         if (cigarOp.consumesReadBases) { readPos += 1 }
@@ -338,9 +337,9 @@ object SimpleSomaticVariantCaller extends Command {
       }
       cigarIdx += 1
     }
-    val stopTime = System.nanoTime
-    println("Expanded %s in %d microseconds".format(record, (stopTime - startTime) / 1000))
-    result
+    //val stopTime = System.nanoTime
+    //println("Expanded %s in %d microseconds".format(record, (stopTime - startTime) / 1000))
+    result.toSeq
   }
 
   /**
