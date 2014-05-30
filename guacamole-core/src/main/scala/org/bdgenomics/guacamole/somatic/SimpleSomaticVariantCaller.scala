@@ -518,6 +518,7 @@ object SimpleSomaticVariantCaller extends Command {
 
     val sc = tumorReads.context
     val referenceIndex = reference.index
+    Common.progress("Contigs: %s".format(reference.index.contigs))
     val broadcastIndex = sc.broadcast(referenceIndex)
     Common.progress("Broadcast reference")
 
