@@ -202,21 +202,20 @@ object SimpleSomaticVariantCaller extends Command {
    * @return RDD of position, pileup pairs
    */
   def buildPileups(reads: RDD[SimpleRead],
-                   broadcastIndex : Broadcast[Reference.Index],
+                   broadcastIndex: Broadcast[Reference.Index],
                    minBaseQuality: Int = 0,
                    minDepth: Int = 0,
-                   partitioner : Option[Partitioner] = None): RDD[(Long, Pileup)] = {
+                   partitioner: Option[Partitioner] = None): RDD[(Long, Pileup)] = {
     var baseReadsAtPos: RDD[(Long, BaseRead)] = reads.flatMap(expandBaseReads(_, broadcastIndex, minBaseQuality))
     baseReadsAtPos = partitioner match {
       case Some(p) => baseReadsAtPos.partitionBy(p)
-      case None => baseReadsAtPos
+      case None    => baseReadsAtPos
     }
     var pileups = baseReadsAtPos.groupByKey()
     if (minDepth > 0) { pileups = pileups.filter(_._2.length >= minDepth) }
     pileups
 
   }
-
 
   /**
    *  Create a simple BaseRead object from the CIGAR operator and other information about a read at a
@@ -315,7 +314,7 @@ object SimpleSomaticVariantCaller extends Command {
     var cigarIdx = 0
     val numCigarElements = cigar.numCigarElements
     val cigarElts = cigar.getCigarElements
-    while (cigarIdx < numCigarElements)  {
+    while (cigarIdx < numCigarElements) {
       val cigarElt = cigarElts(cigarIdx)
       val cigarOp = cigarElt.getOperator
       var length = cigarElt.getLength
@@ -327,7 +326,7 @@ object SimpleSomaticVariantCaller extends Command {
         if (baseReadOpt.isDefined) {
           val baseRead = baseReadOpt.get
           if (baseRead.readQuality.isDefined && baseRead.readQuality.get >= minBaseQuality) {
-            val position: Long =  referenceIndex.value.contigStart.getOrElse(contig, 0L) + refPos
+            val position: Long = referenceIndex.value.contigStart.getOrElse(contig, 0L) + refPos
             result += ((position, baseRead))
           }
         }
@@ -454,10 +453,10 @@ object SimpleSomaticVariantCaller extends Command {
     }
   }
 
-  def expandFlatMap( iter : Iterator[SimpleRead], broadcastIndex : Broadcast[Reference.Index], minBaseQuality : Int ) = {
+  def expandFlatMap(iter: Iterator[SimpleRead], broadcastIndex: Broadcast[Reference.Index], minBaseQuality: Int) = {
     val accumulator = mutable.ArrayBuffer[(Long, BaseRead)]()
     while (iter.hasNext) {
-      val record : SimpleRead = iter.next
+      val record: SimpleRead = iter.next
       val alignmentQuality = record.alignmentQuality
       assume(alignmentQuality >= 0, "Expected non-negative alignment quality, got %d".format(alignmentQuality))
       // using unclipped start since we're considering
@@ -474,7 +473,7 @@ object SimpleSomaticVariantCaller extends Command {
       var cigarIdx = 0
       val numCigarElements = cigar.numCigarElements
       val cigarElts = cigar.getCigarElements
-      while (cigarIdx < numCigarElements)  {
+      while (cigarIdx < numCigarElements) {
         val cigarElt = cigarElts(cigarIdx)
         val cigarOp = cigarElt.getOperator
         var length = cigarElt.getLength
@@ -486,7 +485,7 @@ object SimpleSomaticVariantCaller extends Command {
           if (baseReadOpt.isDefined) {
             val baseRead = baseReadOpt.get
             if (baseRead.readQuality.isDefined && baseRead.readQuality.get >= minBaseQuality) {
-              val position: Long =  broadcastIndex.value.contigStart.getOrElse(contig, 0L) + refPos
+              val position: Long = broadcastIndex.value.contigStart.getOrElse(contig, 0L) + refPos
               accumulator += ((position, baseRead))
             }
           }
@@ -522,15 +521,14 @@ object SimpleSomaticVariantCaller extends Command {
     val broadcastIndex = sc.broadcast(referenceIndex)
     Common.progress("Broadcast reference")
 
-    def readKey(read : SimpleRead) = {
+    def readKey(read: SimpleRead) = {
       val contig = read.referenceContig
       val contigStart = broadcastIndex.value.contigStart(contig)
       contigStart + read.start
     }
 
-
     val tumorKeyed = tumorReads.keyBy(readKey _)
-    val minKey : Long = tumorKeyed.keys.reduce(Math.min _)
+    val minKey: Long = tumorKeyed.keys.reduce(Math.min _)
     Common.progress("Min tumor key: " + minKey.toString)
     assert(minKey >= 0, "Expected only positive keys, got " + minKey.toString)
     val normalKeyed = normalReads.keyBy(readKey _)
@@ -543,18 +541,16 @@ object SimpleSomaticVariantCaller extends Command {
     Common.progress("maxPartitions: %d, numPartitions: %d".format(maxPartitions, numPartitions))
     val partitioner: Partitioner = new RangePartitioner(numPartitions, tumorKeyed)
 
-    val tumorReadsPartitioned : RDD[SimpleRead] = tumorKeyed.partitionBy(partitioner).values
+    val tumorReadsPartitioned: RDD[SimpleRead] = tumorKeyed.partitionBy(partitioner).values
 
     Common.progress("Tumor reads partitioned: %s with %d partitions".format(
       tumorReadsPartitioned.getClass,
-      tumorReadsPartitioned.partitions.size
-    ))
-    val normalReadsPartitioned : RDD[SimpleRead] = normalKeyed.partitionBy(partitioner).values
+      tumorReadsPartitioned.partitions.size))
+    val normalReadsPartitioned: RDD[SimpleRead] = normalKeyed.partitionBy(partitioner).values
 
     Common.progress("Normal reads partitioned: %s with %d partitions".format(
       normalReadsPartitioned.getClass,
-      normalReadsPartitioned.partitions.size
-    ))
+      normalReadsPartitioned.partitions.size))
 
     val tumorBases =
       tumorReadsPartitioned.mapPartitions(expandFlatMap(_, broadcastIndex, minBaseQuality))
@@ -562,7 +558,6 @@ object SimpleSomaticVariantCaller extends Command {
     Common.progress("Tumor bases: %s with %d partitions".format(
       tumorBases.getClass,
       tumorBases.partitions.size))
-
 
     val normalBases =
       normalReadsPartitioned.mapPartitions(expandFlatMap(_, broadcastIndex, minBaseQuality))
@@ -584,8 +579,9 @@ object SimpleSomaticVariantCaller extends Command {
       normalPileups.partitions.size))
 
     val tumorNormalJoined = tumorPileups.join(normalPileups)
-    val tumorNormalFiltered = tumorNormalJoined.filter {case (_, (t, n)) =>
-       t.length >= minTumorCoverage && n.length >= minNormalCoverage
+    val tumorNormalFiltered = tumorNormalJoined.filter {
+      case (_, (t, n)) =>
+        t.length >= minTumorCoverage && n.length >= minNormalCoverage
     }
     val tumorNormalRef = tumorNormalFiltered.join(reference.basesAtGlobalPositions)
 
