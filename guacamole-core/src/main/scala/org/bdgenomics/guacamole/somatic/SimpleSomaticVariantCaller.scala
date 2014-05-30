@@ -538,79 +538,56 @@ object SimpleSomaticVariantCaller extends Command {
 
     val tumorReadsPartitioned : RDD[SimpleRead] = tumorKeyed.partitionBy(partitioner).values
 
-    Common.progress("Tumor reads partitioned: %s with %d partitions and %d elements".format(
+    Common.progress("Tumor reads partitioned: %s with %d partitions".format(
       tumorReadsPartitioned.getClass,
-      tumorReadsPartitioned.partitions.size,
-      tumorReadsPartitioned.count
+      tumorReadsPartitioned.partitions.size
     ))
     val normalReadsPartitioned : RDD[SimpleRead] = normalKeyed.partitionBy(partitioner).values
 
-    Common.progress("Normal reads partitioned: %s with %d partitions and %d elements".format(
+    Common.progress("Normal reads partitioned: %s with %d partitions".format(
       normalReadsPartitioned.getClass,
-      normalReadsPartitioned.partitions.size,
-      normalReadsPartitioned.count
+      normalReadsPartitioned.partitions.size
     ))
 
     val tumorBases =
       tumorReadsPartitioned.mapPartitions(expandFlatMap(_, broadcastIndex, minBaseQuality))
 
-    Common.progress("Tumor bases: %s with %d partitions, %d elements".format(
+    Common.progress("Tumor bases: %s with %d partitions".format(
       tumorBases.getClass,
-      tumorBases.partitions.size,
-      tumorBases.count))
-
-    val taggedTumorBases = tumorBases.mapValues(read => ( 't', read))
-
-    Common.progress("Tagged bases: %s with %d partitions, %d elements".format(
-      taggedTumorBases.getClass,
-      taggedTumorBases.partitions.size,
-      taggedTumorBases.count))
+      tumorBases.partitions.size))
 
 
     val normalBases =
-      normalReadsPartitioned.flatMap(expandBaseReads(_, broadcastIndex, minBaseQuality))
+      normalReadsPartitioned.mapPartitions(expandFlatMap(_, broadcastIndex, minBaseQuality))
 
-    Common.progress("Normal bases: %s with %d partitions, %d elements".format(
+    Common.progress("Normal bases: %s with %d partitions".format(
       normalBases.getClass,
-      normalBases.partitions.size,
-      normalBases.count))
-    val taggedNormalBases = normalBases.mapValues(read => ( 'n', read)).cache()
+      normalBases.partitions.size))
 
-    Common.progress("Tagged normal bases: %s with %d partitions, %d elements".format(
-      taggedNormalBases.getClass,
-      taggedNormalBases.partitions.size,
-      taggedNormalBases.count))
+    val tumorPileups = tumorBases.groupByKey()
 
+    Common.progress("Tumor pileups joined %s with %d partitions ".format(
+      tumorPileups.getClass,
+      tumorPileups.partitions.size))
 
-    val tumorNormalUnion = taggedTumorBases.union(taggedNormalBases)
+    val normalPileups = normalBases.groupByKey()
 
-    val tumorNormalJoined : RDD[(Long, (Pileup, Pileup))] = tumorNormalUnion.groupByKey(partitioner).mapValues {
-      case bases =>
-        val fromTumor = mutable.ArrayBuffer[BaseRead]()
-        val fromNormal = mutable.ArrayBuffer[BaseRead]()
-        for ( (tag, base)  <- bases) {
-         if (tag == 't') {
-            fromTumor += base
-          } else {
-            fromNormal += base
-          }
-        }
-        (fromTumor, fromNormal)
-    }
+    Common.progress("Normal pileups joined %s with %d partitions ".format(
+      normalPileups.getClass,
+      normalPileups.partitions.size))
+
+    val tumorNormalJoined = tumorPileups.join(normalPileups)
     val tumorNormalFiltered = tumorNormalJoined.filter {case (_, (t, n)) =>
        t.length >= minTumorCoverage && n.length >= minNormalCoverage
     }
-    val tumorNormalRef = tumorNormalFiltered.join(reference.basesAtGlobalPositions).map({case (k, ((v1, v2), v3)) =>
-      (k, (v1, v2, v3))
-    }).cache()
+    val tumorNormalRef = tumorNormalFiltered.join(reference.basesAtGlobalPositions)
 
-    Common.progress("Tumor-normal-ref joined %s with %d partitions and %d elements".format(
+    Common.progress("Tumor-normal-ref joined %s with %d partitions ".format(
       tumorNormalRef.getClass,
-      tumorNormalRef.partitions.size,
-      tumorNormalRef.count))
+      tumorNormalRef.partitions.size))
 
     val genotypes: RDD[ADAMGenotype] = tumorNormalRef.flatMap({
-      case (globalPosition, (tumorPileup, normalPileup, ref)) =>
+      case (globalPosition, ((tumorPileup, normalPileup), ref)) =>
         val locus = broadcastIndex.value.globalPositionToLocus(globalPosition)
         callVariantGenotype(locus, tumorPileup, normalPileup, ref)
     })
