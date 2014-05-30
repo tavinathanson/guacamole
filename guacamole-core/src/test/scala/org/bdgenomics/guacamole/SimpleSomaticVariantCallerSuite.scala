@@ -49,7 +49,7 @@ class SimpleSomaticVariantCallerSuite extends TestUtil.SparkFunSuite with Should
   val sameStartContigName = "artificial"
   val sameStartReferenceBases: List[((String, Long), Byte)] =
     zipWithReferenceIndices(sameStartReferenceSeq, sameStartContigName)
-  val sameStartIndex = Reference.Index(Map[String, Long]("artifical" -> 70))
+  val sameStartIndex = Reference.Index(Map[String, Long]("artificial" -> 70))
 
   sparkTest("No repeated positions in pileup RDD") {
     val normalReads = loadReads("same_start_reads.sam")

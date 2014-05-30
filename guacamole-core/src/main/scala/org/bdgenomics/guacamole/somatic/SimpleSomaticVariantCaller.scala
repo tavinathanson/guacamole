@@ -523,10 +523,15 @@ object SimpleSomaticVariantCaller extends Command {
 
     def readKey(read : SimpleRead) = {
       val contig = read.referenceContig
-      val offset = (read.start + read.end) / 2L
-      broadcastIndex.value.locusToGlobalPosition( (contig, offset) )
+      val contigStart = broadcastIndex.value.contigStart(contig)
+      contigStart + read.start
     }
+
+
     val tumorKeyed = tumorReads.keyBy(readKey _)
+    val minKey : Long = tumorKeyed.keys.reduce(Math.min _)
+    Common.progress("Min tumor key: " + minKey.toString)
+    assert(minKey >= 0, "Expected only positive keys, got " + minKey.toString)
     val normalKeyed = normalReads.keyBy(readKey _)
 
     Common.progress("Keyed reads")
@@ -534,6 +539,7 @@ object SimpleSomaticVariantCaller extends Command {
     val maxPartitions = (referenceIndex.numLoci / 10000L + 1).toInt
     val tumorPartitions = tumorReads.partitions.size
     val numPartitions: Int = Math.min(10 * tumorPartitions, maxPartitions)
+    Common.progress("maxPartitions: %d, numPartitions: %d".format(maxPartitions, numPartitions))
     val partitioner: Partitioner = new RangePartitioner(numPartitions, tumorKeyed)
 
     val tumorReadsPartitioned : RDD[SimpleRead] = tumorKeyed.partitionBy(partitioner).values
