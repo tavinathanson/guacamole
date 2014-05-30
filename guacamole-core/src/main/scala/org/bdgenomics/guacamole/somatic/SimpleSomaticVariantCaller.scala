@@ -18,26 +18,22 @@
 
 package org.bdgenomics.guacamole.somatic
 
-import org.bdgenomics.adam.avro._
-import org.bdgenomics.guacamole.{ Common, Command }
-import org.bdgenomics.guacamole.Common.Arguments.{ OptionalOutput, Base }
-import org.bdgenomics.adam.cli.Args4j
-import org.apache.spark.rdd.RDD
-import org.apache.spark._
-import org.apache.spark.SparkContext._
-import org.apache.spark.SparkContext.rddToPairRDDFunctions
-import scala.collection.{ mutable, JavaConversions }
-import org.bdgenomics.adam.rdd.ADAMContext._
-import net.sf.samtools.{ CigarOperator }
-import org.apache.hadoop.io.{ Text, LongWritable }
-import org.apache.hadoop.mapred.TextInputFormat
-import org.bdgenomics.guacamole.somatic.Reference.Locus
-import scala.Some
 import scala.reflect.ClassTag
 import java.io.{ ObjectOutputStream, IOException }
-import scala.Some
+import scala.collection.{ mutable, JavaConversions }
+import net.sf.samtools.{ CigarOperator }
+
+import org.bdgenomics.adam.avro._
+import org.bdgenomics.adam.cli.Args4j
+import org.bdgenomics.adam.rdd.ADAMContext._
+import org.bdgenomics.guacamole.{ Common, Command }
+import org.bdgenomics.guacamole.Common.Arguments.{ OptionalOutput, Base }
+import org.apache.spark.rdd.RDD
+import org.apache.spark._
 import org.apache.spark.broadcast.Broadcast
-import org.apache.commons.logging.impl.Log4JLogger
+
+import org.apache.spark.SparkContext._
+import org.apache.spark.SparkContext.rddToPairRDDFunctions
 
 /**
  * Simple somatic variant caller implementation.
@@ -354,8 +350,7 @@ object SimpleSomaticVariantCaller extends Command {
    * @param locus Position on a chromosome
    * @return ADAM Genotype object corresponding to this variant.
    */
-  def buildGenotype(ref: Byte, alt: Byte, locus: Locus): ADAMGenotype = {
-    val (contigName, pos) = locus
+  def buildGenotype(ref: Byte, alt: Byte, contigName: String, pos : Long): ADAMGenotype = {
     val contig: ADAMContig = ADAMContig.newBuilder.setContigName(contigName).build
     val variant: ADAMVariant =
       ADAMVariant.newBuilder
@@ -428,12 +423,14 @@ object SimpleSomaticVariantCaller extends Command {
   /**
    * Call a single somatic variant from the normal and tumor reads at a particular locus.
    *
-   * @param locus Location on the chromosome.
+   * @param contigName
+   * @param position Location on the chromosome.
    * @param normalPileup Collection of bases read from normal sample which align to this locus.
    * @param tumorPileup Collection of bases read from tumor sample which to this locus.
    * @return An optional ADAMGenotype denoting the variant called, or None if there is no variant.
    */
-  def callVariantGenotype(locus: Locus,
+  def callVariantGenotype(contigName: String,
+                          position : Long,
                           tumorPileup: Pileup,
                           normalPileup: Pileup,
                           ref: Byte): Option[ADAMGenotype] = {
@@ -446,7 +443,7 @@ object SimpleSomaticVariantCaller extends Command {
       // without reference genome we won't know if this is a somatic variant
       // or loss of heterozygosity
       case Some(alt) if alt != ref =>
-        Some(buildGenotype(ref, alt, locus))
+        Some(buildGenotype(ref, alt, contigName, position))
       case other =>
         None
 
@@ -521,17 +518,19 @@ object SimpleSomaticVariantCaller extends Command {
     val broadcastIndex = sc.broadcast(referenceIndex)
     Common.progress("Broadcast reference")
 
-    def readKey(read: SimpleRead) = {
+    def posKey(read: SimpleRead): Option[(Long, SimpleRead)] = {
       val contig = read.referenceContig
-      val contigStart = broadcastIndex.value.contigStart(contig)
-      contigStart + read.start
+      if (broadcastIndex.value.contigStart.contains(contig)) {
+        val contigStart = broadcastIndex.value.contigStart(contig)
+        Some( (contigStart + read.start, read) )
+      } else {  None }
     }
 
-    val tumorKeyed = tumorReads.keyBy(readKey _)
+    val tumorKeyed = tumorReads.flatMap(posKey _)
     val minKey: Long = tumorKeyed.keys.reduce(Math.min _)
     Common.progress("Min tumor key: " + minKey.toString)
     assert(minKey >= 0, "Expected only positive keys, got " + minKey.toString)
-    val normalKeyed = normalReads.keyBy(readKey _)
+    val normalKeyed = normalReads.flatMap(posKey _)
 
     Common.progress("Keyed reads")
 
@@ -591,8 +590,8 @@ object SimpleSomaticVariantCaller extends Command {
 
     val genotypes: RDD[ADAMGenotype] = tumorNormalRef.flatMap({
       case (globalPosition, ((tumorPileup, normalPileup), ref)) =>
-        val locus = broadcastIndex.value.globalPositionToLocus(globalPosition)
-        callVariantGenotype(locus, tumorPileup, normalPileup, ref)
+        val (contigName, offset) = broadcastIndex.value.globalPositionToLocus(globalPosition)
+        callVariantGenotype(contigName, offset, tumorPileup, normalPileup, ref)
     })
     Common.progress("Done calling genotypes: %s with %d partitions (deps = %s)".format(
       genotypes.getClass, genotypes.partitions.size, genotypes.dependencies))
