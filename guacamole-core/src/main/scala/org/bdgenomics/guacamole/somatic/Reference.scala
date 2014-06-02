@@ -15,14 +15,16 @@ import org.apache.spark.broadcast.Broadcast
 
 case class Reference(@transient basesAtLoci: RDD[(Reference.Locus, Byte)],
                      index: Reference.Index) {
-  val broadcastIndex = basesAtLoci.context.broadcast(index)
+
   val basesAtGlobalPositions: RDD[(Long, Byte)] = {
     // prevent serialization
-    val localBroadcastIndex = broadcastIndex
-    basesAtLoci.cache().map({
-      case (locus, nucleotide) =>
-        val position: Long = localBroadcastIndex.value.locusToGlobalPosition(locus)
-        (position, nucleotide)
+    val contigStart = basesAtLoci.context.broadcast(index.contigStart)
+
+    basesAtLoci.map({
+      case ((contigName, offset), nucleotide) =>
+
+        val start: Long = contigStart.value(contigName)
+        (start + offset, nucleotide)
     }).cache()
   }
 }
