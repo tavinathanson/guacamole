@@ -73,7 +73,7 @@ object ThresholdVariantCaller extends Command with Serializable with Logging {
     val genotypes: RDD[ADAMGenotype] = DistributedUtil.pileupFlatMap[ADAMGenotype](
       mappedReads,
       lociPartitions,
-      pileup => {
+      (contig, locus, pileup) => {
         val genotypes = callVariantsAtLocus(pileup, threshold, emitRef, emitNoCall)
         numGenotypes += genotypes.length
         genotypes.iterator

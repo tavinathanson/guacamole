@@ -212,7 +212,7 @@ object DistributedUtil extends Logging {
    */
   def pileupFlatMap[T: ClassTag](reads: RDD[MappedRead],
                                  lociPartitions: LociMap[Long],
-                                 function: Pileup => Iterator[T]): RDD[T] = {
+                                 function: (String, Long, Pileup) => Iterator[T]): RDD[T] = {
     windowTaskFlatMap(reads, lociPartitions, 0L, (task, taskLoci, taskReads) => {
       // The code here is running in parallel in each task.
 
@@ -230,7 +230,7 @@ object DistributedUtil extends Logging {
               case None         => Pileup(newReads, locus)
               case Some(pileup) => pileup.atGreaterLocus(locus, newReads.iterator)
             })
-            function(maybePileup.get)
+            function(contig, locus, maybePileup.get)
           })
         }
       })
@@ -247,7 +247,7 @@ object DistributedUtil extends Logging {
   def pileupFlatMapTwoRDDs[T: ClassTag](reads1: RDD[MappedRead],
                                         reads2: RDD[MappedRead],
                                         lociPartitions: LociMap[Long],
-                                        function: (Pileup, Pileup) => Iterator[T]): RDD[T] = {
+                                        function: (String, Long, Pileup, Pileup) => Iterator[T]): RDD[T] = {
     windowTaskFlatMapTwoRDDs(reads1, reads2, lociPartitions, 0L, (task, taskLoci, taskReads1, taskReads2) => {
       // The code here is running in parallel in each task.
 
@@ -275,7 +275,7 @@ object DistributedUtil extends Logging {
             case None         => Pileup(newReads2, locus)
             case Some(pileup) => pileup.atGreaterLocus(locus, newReads2.iterator)
           })
-          function(maybePileup1.get, maybePileup2.get)
+          function(contig, locus, maybePileup1.get, maybePileup2.get)
         })
       })
     })

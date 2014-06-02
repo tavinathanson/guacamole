@@ -25,6 +25,7 @@ object Bases {
   val C = "C".getBytes()(0)
   val T = "T".getBytes()(0)
   val G = "G".getBytes()(0)
+  val standardBases = Seq(A, C, T, G)
 
   /** Is the given base one of the 4 canonical DNA bases? */
   def isStandardBase(base: Byte): Boolean = {

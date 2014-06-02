@@ -83,7 +83,7 @@ object SomaticThresholdVariantCaller extends Command with Serializable with Logg
       mappedTumorReads,
       mappedNormalReads,
       lociPartitions,
-      (pileupTumor, pileupNormal) => {
+      (contig, locus, pileupTumor, pileupNormal) => {
         val genotypes = callVariantsAtLocus(pileupTumor, pileupNormal, thresholdTumor, thresholdNormal)
         numGenotypes += genotypes.length
         genotypes.iterator
@@ -92,6 +92,15 @@ object SomaticThresholdVariantCaller extends Command with Serializable with Logg
     mappedNormalReads.unpersist()
     Common.writeVariantsFromArguments(args, genotypes)
     DelayedMessages.default.print()
+  }
+
+  // Given a Pileup, return a Map from single base alleles to the percent of reads that have that allele.
+  def possibleSNVAllelePercents(pileup: Pileup): Map[Byte, Double] = {
+    val totalReads = pileup.elements.length
+    val matchesOrMismatches = pileup.elements.filter(e => e.isMatch || e.isMismatch)
+    val counts = matchesOrMismatches.map(_.sequencedSingleBase).groupBy(char => char).mapValues(_.length)
+    val percents = counts.mapValues(_ * 100.0 / totalReads.toDouble)
+    percents.withDefaultValue(0.0)
   }
 
   def callVariantsAtLocus(
@@ -106,15 +115,6 @@ object SomaticThresholdVariantCaller extends Command with Serializable with Logg
 
     val refBase = pileupTumor.referenceBase
     assert(refBase == pileupNormal.referenceBase)
-
-    // Given a Pileup, return a Map from single base alleles to the percent of reads that have that allele.
-    def possibleSNVAllelePercents(pileup: Pileup): Map[Byte, Double] = {
-      val totalReads = pileup.elements.length
-      val matchesOrMismatches = pileup.elements.filter(e => e.isMatch || e.isMismatch)
-      val counts = matchesOrMismatches.map(_.sequencedSingleBase).groupBy(char => char).mapValues(_.length)
-      val percents = counts.mapValues(_ * 100.0 / totalReads.toDouble)
-      percents.withDefaultValue(0.0)
-    }
 
     def variant(alternateBase: Byte, allelesList: List[ADAMGenotypeAllele]): ADAMGenotype = {
       ADAMGenotype.newBuilder

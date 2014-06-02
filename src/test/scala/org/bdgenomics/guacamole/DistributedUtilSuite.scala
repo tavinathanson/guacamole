@@ -96,7 +96,7 @@ class DistributedUtilSuite extends TestUtil.SparkFunSuite with ShouldMatchers {
     val pileups = DistributedUtil.pileupFlatMap[Pileup](
       reads,
       DistributedUtil.partitionLociUniformly(reads.partitions.length, LociSet.parse("chr1:1-9")),
-      pileup => Seq(pileup).iterator).collect()
+      (contig, locus, pileup) => Seq(pileup).iterator).collect()
 
     pileups.length should be(8)
     val firstPileup = pileups.head
@@ -120,7 +120,7 @@ class DistributedUtilSuite extends TestUtil.SparkFunSuite with ShouldMatchers {
     val pileups = DistributedUtil.pileupFlatMap[Pileup](
       reads,
       DistributedUtil.partitionLociUniformly(5, LociSet.parse("chr1:1-9")),
-      pileup => Seq(pileup).iterator).collect()
+      (contig, locus, pileup) => Seq(pileup).iterator).collect()
 
     val firstPileup = pileups.head
     firstPileup.locus should be(1L)
@@ -140,7 +140,7 @@ class DistributedUtilSuite extends TestUtil.SparkFunSuite with ShouldMatchers {
     val pileups = DistributedUtil.pileupFlatMap[PileupElement](
       reads,
       DistributedUtil.partitionLociUniformly(5, LociSet.parse("chr1:1-9")),
-      pileup => pileup.elements.toIterator).collect()
+      (contig, locus, pileup) => pileup.elements.toIterator).collect()
 
     pileups.length should be(24)
     pileups.forall(_.isMatch) should be(true)
@@ -183,7 +183,7 @@ class DistributedUtilSuite extends TestUtil.SparkFunSuite with ShouldMatchers {
     val pileups = DistributedUtil.pileupFlatMap[PileupElement](
       reads,
       DistributedUtil.partitionLociUniformly(5, LociSet.parse("chr1:1-12")),
-      pileup => pileup.elements.toIterator).collect()
+      (contig, locus, pileup) => pileup.elements.toIterator).collect()
 
     pileups.length should be(24)
     val insertionPileups = pileups.filter(_.isInsertion)
@@ -200,7 +200,7 @@ class DistributedUtilSuite extends TestUtil.SparkFunSuite with ShouldMatchers {
     val genotypes = DistributedUtil.pileupFlatMap[ADAMGenotype](
       reads,
       DistributedUtil.partitionLociUniformly(reads.partitions.length, Common.getLociFromReads(reads)),
-      pileup => ThresholdVariantCaller.callVariantsAtLocus(pileup, 0, false, false).iterator).collect()
+      (contig, locus, pileup) => ThresholdVariantCaller.callVariantsAtLocus(pileup, 0, false, false).iterator).collect()
 
     genotypes.length should be(0)
   }
@@ -215,7 +215,7 @@ class DistributedUtilSuite extends TestUtil.SparkFunSuite with ShouldMatchers {
     val genotypes = DistributedUtil.pileupFlatMap[ADAMGenotype](
       reads,
       DistributedUtil.partitionLociUniformly(3, Common.getLociFromReads(reads)),
-      pileup => ThresholdVariantCaller.callVariantsAtLocus(pileup, 0, false, false).iterator).collect()
+      (contig, locus, pileup) => ThresholdVariantCaller.callVariantsAtLocus(pileup, 0, false, false).iterator).collect()
 
     genotypes.length should be(0)
   }
@@ -230,7 +230,7 @@ class DistributedUtilSuite extends TestUtil.SparkFunSuite with ShouldMatchers {
     val genotypes = DistributedUtil.pileupFlatMap[ADAMGenotype](
       reads,
       DistributedUtil.partitionLociUniformly(3, Common.getLociFromReads(reads)),
-      pileup => ThresholdVariantCaller.callVariantsAtLocus(pileup, 0, false, false).iterator).collect()
+      (contig, locus, pileup) => ThresholdVariantCaller.callVariantsAtLocus(pileup, 0, false, false).iterator).collect()
 
     genotypes.length should be(1)
     genotypes.head.variant.position should be(4)
@@ -251,7 +251,7 @@ class DistributedUtilSuite extends TestUtil.SparkFunSuite with ShouldMatchers {
     val genotypes = DistributedUtil.pileupFlatMap[ADAMGenotype](
       reads,
       DistributedUtil.partitionLociUniformly(3, lociToUse),
-      pileup => ThresholdVariantCaller.callVariantsAtLocus(pileup, 0, false, false).iterator).collect()
+      (contig, locus, pileup) => ThresholdVariantCaller.callVariantsAtLocus(pileup, 0, false, false).iterator).collect()
 
     genotypes.length should be(1)
     genotypes.head.variant.position should be(1)

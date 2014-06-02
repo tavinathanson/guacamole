@@ -107,7 +107,7 @@ object BayesianQualityVariantCaller extends Command with Serializable with Loggi
     val genotypes: RDD[ADAMGenotype] = DistributedUtil.pileupFlatMap[ADAMGenotype](
       mappedReads,
       lociPartitions,
-      pileup => callVariantsAtLocus(pileup).iterator)
+      (contig, locus, pileup) => callVariantsAtLocus(pileup).iterator)
     mappedReads.unpersist()
 
     Common.writeVariantsFromArguments(args, genotypes)
