@@ -146,8 +146,8 @@ object DistributedUtil extends Logging {
           })
         })
         Seq(counts).iterator
-      }).reduce(addArray _)
-    }).reduce(addArray _)
+      }).reduce(addArray)
+    }).reduce(addArray)
 
     // Step (3)
     // Assign loci to tasks, taking into account read depth in each micro partition.
