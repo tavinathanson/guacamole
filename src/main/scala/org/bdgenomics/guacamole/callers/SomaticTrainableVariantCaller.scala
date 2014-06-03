@@ -1,17 +1,16 @@
 package org.bdgenomics.guacamole.callers
 
 import org.bdgenomics.guacamole._
-import org.apache.spark.{SparkContext, Logging}
+import org.apache.spark.{ SparkContext, Logging }
 import org.bdgenomics.guacamole.Common.Arguments.{ TumorNormalReads, Output, Base }
 import org.kohsuke.args4j.{ Option => Opt }
 import org.bdgenomics.adam.cli.Args4j
-import org.apache.spark.rdd.RDD
+import org.apache.spark.rdd._
 import org.bdgenomics.guacamole.pileup.Pileup
 import scala.collection.{ mutable, JavaConversions }
 import scala.Some
 import org.apache.spark.mllib.regression.LabeledPoint
 import org.apache.spark.SparkContext._
-import org.apache.spark.rdd._
 import org.apache.spark.mllib.classification.{ LogisticRegressionModel, LogisticRegressionWithSGD }
 import org.apache.hadoop.fs.{ FileSystem, Path }
 import java.io.{ InputStreamReader, BufferedReader, OutputStreamWriter, BufferedWriter }
@@ -19,6 +18,9 @@ import org.apache.hadoop.conf.Configuration
 import scala.collection.mutable.ArrayBuffer
 import org.bdgenomics.adam.rdd.ADAMContext
 import org.bdgenomics.adam.rdd.variation.ADAMVariationContext
+import scala.Some
+import org.bdgenomics.guacamole.MappedRead
+import org.apache.spark.mllib.regression.LabeledPoint
 
 object SomaticTrainableVariantCaller extends Command with Serializable with Logging {
   override val name = "somatic-trainable"
@@ -46,14 +48,24 @@ object SomaticTrainableVariantCaller extends Command with Serializable with Logg
     var predictModelInput: String = ""
 
     @Opt(name = "-test-holdout-percent", metaVar = "X",
-      usage = "")
+      usage = "Implies -test.")
     var testHoldOutPercent: Int = 0
+
+    @Opt(name = "-test",
+      usage = "")
+    var test: Boolean = false
+
+    @Opt(name = "-predict",
+      usage = "")
+    var predict: Boolean = false
   }
   type LocusLabel = (Long, Long)
 
   override def run(rawArgs: Array[String]): Unit = {
     val args = Args4j[Arguments](rawArgs)
     val sc = Common.createSparkContext(args, appName = Some(name))
+
+    if (args.testHoldOutPercent > 0) args.test = true
 
     val (rawTumorReads, tumorDictionary, rawNormalReads, normalDictionary) =
       Common.loadTumorNormalReadsFromArguments(args, sc, mapped = true, nonDuplicate = true)
@@ -74,46 +86,46 @@ object SomaticTrainableVariantCaller extends Command with Serializable with Logg
       mappedNormalReads.count, mappedNormalReads.partitions.length))
 
     val loci = Common.loci(args, normalDictionary)
-    val lociPartitions = DistributedUtil.partitionLociAccordingToArgs(args, loci, mappedTumorReads, mappedNormalReads)
+    val (trainingLoci, testLoci) = if (args.testHoldOutPercent > 0) {
+      Common.progress("Splitting %,d loci into training and test sets.".format(loci.count))
+      val trainingBuilder = LociSet.newBuilder
+      val testBuilder = LociSet.newBuilder
+      loci.contigs.foreach(contig => {
+        loci.onContig(contig).individually.foreach(locus => {
+          val builder = if (math.random * 100 > args.testHoldOutPercent) trainingBuilder else testBuilder
+          builder.put(contig, locus, locus + 1)
+        })
+      })
+      (trainingBuilder.result, testBuilder.result)
+    } else {
+      (loci, loci)
+    }
+    Common.progress("Using %,d loci for training and %,d loci for testing.".format(
+      trainingLoci.count, testLoci.count))
+
     val contigToNum = sc.broadcast(loci.contigs.sorted.zipWithIndex.toMap)
     val numToContig = sc.broadcast(contigToNum.value.map(pair => (pair._2, pair._1)))
     def labelLocus(contig: String, locus: Long): LocusLabel = {
       (contigToNum.value(contig), locus)
     }
+    val labels = getLabelsFromArgs(args, sc, loci)
+    val broadcastLabels = sc.broadcast(labels)
 
-    def splitTrainingAndTest(reads: RDD[MappedRead]): (RDD[MappedRead], RDD[MappedRead]) = {
-      if (args.predictModelInput.nonEmpty) {
-        (reads, reads)
-      } else {
-        if (args.testHoldOutPercent > 0) {
-          // TODO: We are not actually splitting these into disjoint sets!
-          // There will be elements in both of these sets!
-          // When we upgrade to Spark 1.0, use reads.randomSplit here to fix this.
-          val training = reads.sample(false, (100 - args.testHoldOutPercent).toDouble / 100.0, 0)
-          val test = reads.sample(false, args.testHoldOutPercent.toDouble / 100.0, 0)
-          (training, test)
-        } else {
-          (reads, reads)
-        }
-      }
+    def labelFeatures(features: RDD[(LocusLabel, Array[Double])]): RDD[LabeledPoint] = {
+      features.map({case ((contigNum, locus), features) => {
+        val contig = numToContig.value(contigNum.toInt)
+        val label = broadcastLabels.value.onContig(contig).get(locus).get.toDouble
+        LabeledPoint(label, features)
+      }})
     }
-    val (trainingTumorReads, testTumorReads) = splitTrainingAndTest(mappedTumorReads)
-    val (trainingNormalReads, testNormalReads) = splitTrainingAndTest(mappedNormalReads)
-  
+
     val model = if (args.predictModelInput.nonEmpty) {
       readModel(args)
     } else {
       // Training.
-      val labels = getLabelsFromArgs(args, sc, loci)
-      val broadcastLabels = sc.broadcast(labels)
-      val features = getFeatures(args, lociPartitions, trainingTumorReads, trainingNormalReads, labelLocus)
-      val labeledFeatures = features.map({
-        case ((contigNum, locus), features) => {
-          val contig = numToContig.value(contigNum.toInt)
-          val label = broadcastLabels.value.onContig(contig).get(locus).get.toDouble
-          LabeledPoint(label, features)
-        }
-      })
+      val lociPartitions = DistributedUtil.partitionLociAccordingToArgs(args, testLoci, mappedTumorReads, mappedNormalReads)
+      val features = getFeatures(args, lociPartitions, mappedTumorReads, mappedNormalReads, labelLocus)
+      val labeledFeatures = labelFeatures(features)
       val model = LogisticRegressionWithSGD.train(labeledFeatures, args.trainNumIterations)
       Common.progress("Done training model.")
       Common.progress("Model: %s".format(model.toString))
@@ -122,20 +134,38 @@ object SomaticTrainableVariantCaller extends Command with Serializable with Logg
     // Write model if the user requested it.
     maybeWriteModel(args, model)
 
-    if (args.testHoldOutPercent > 0) {
-      val dummyLabels = sc.broadcast(lociPartitions)
-      val features = getFeatures(args, lociPartitions, testTumorReads, testNormalReads, labelLocus).sortByKey()
-      val predictions = model.predict(features.map(pair => pair._2))
-      val locusAndPredictions = features.map(pair => (pair._1)).zip(predictions)
+    if (args.test) {
+      Common.progress("Testing.")
+      val lociPartitions = DistributedUtil.partitionLociAccordingToArgs(args, trainingLoci, mappedTumorReads, mappedNormalReads)
+      val features = getFeatures(args, lociPartitions, mappedTumorReads, mappedNormalReads, labelLocus).sortByKey()
+      val labeledFeatures = labelFeatures(features)
+      val truthPredictionPairs = labeledFeatures.map(point => {
+        (point.label > .5, model.predict(point.features) > .5)
+      })
+      val counts = truthPredictionPairs.countByValue
+      def printCount(label: String, numerator: Long, denominator: Long) = {
+        println("%s: %,d / %,d = %,2f%%".format(label, numerator, denominator, numerator * 100.0 / denominator))
+      }
+      println("**************************** TEST RESULTS *****************************")
+      printCount("Called positive / true positives", counts((true, true)), counts((true, true)) + counts((true, false)))
+      printCount("Called negative / true negatives", counts((false, false)), counts((false, true)) + counts((false, false)))
+      println("***********************************************************************")
+    }
+
+    if (args.predict) {
+      Common.progress("Predicting.")
+      val lociPartitions = DistributedUtil.partitionLociAccordingToArgs(args, loci, mappedTumorReads, mappedNormalReads)
+      val features = getFeatures(args, lociPartitions, mappedTumorReads, mappedNormalReads, labelLocus).sortByKey()
+      val locusAndPredictions = features.map(pair => (pair._1, model.predict(pair._2)))
       val called = locusAndPredictions.filter(pair => pair._2 > .5).map(_._1).collect
 
-      val calledBuiler = LociSet.newBuilder
+      val calledBuilder = LociSet.newBuilder
       called.foreach({
         case (contigNum, locus) => {
-          calledBuiler.put(numToContig.value(contigNum.toInt), locus, locus + 1)
+          calledBuilder.put(numToContig.value(contigNum.toInt), locus, locus + 1)
         }
       })
-      val calledLoci = calledBuiler.result
+      val calledLoci = calledBuilder.result
 
       Common.progress("Called %,d loci.".format(calledLoci.count))
       println(calledLoci.truncatedString(1000))

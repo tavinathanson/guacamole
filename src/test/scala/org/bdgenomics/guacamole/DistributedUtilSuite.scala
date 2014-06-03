@@ -166,7 +166,7 @@ class DistributedUtilSuite extends TestUtil.SparkFunSuite with ShouldMatchers {
       reads1,
       reads2,
       DistributedUtil.partitionLociUniformly(1000, LociSet.parse("chr1:1-500")),
-      (pileup1, pileup2) => (pileup1.elements ++ pileup2.elements).toIterator).collect()
+      (contig, locus, pileup1, pileup2) => (pileup1.elements ++ pileup2.elements).toIterator).collect()
 
     elements.forall(_.isMatch) should be(true)
     val concatenated = Bases.basesToString(elements.map(_.sequencedSingleBase))
