@@ -1,7 +1,7 @@
 package org.bdgenomics.guacamole.callers
 
 import org.bdgenomics.guacamole._
-import org.apache.spark.Logging
+import org.apache.spark.{SparkContext, Logging}
 import org.bdgenomics.guacamole.Common.Arguments.{ TumorNormalReads, Output, Base }
 import org.kohsuke.args4j.{ Option => Opt }
 import org.bdgenomics.adam.cli.Args4j
@@ -17,6 +17,8 @@ import org.apache.hadoop.fs.{ FileSystem, Path }
 import java.io.{ InputStreamReader, BufferedReader, OutputStreamWriter, BufferedWriter }
 import org.apache.hadoop.conf.Configuration
 import scala.collection.mutable.ArrayBuffer
+import org.bdgenomics.adam.rdd.ADAMContext
+import org.bdgenomics.adam.rdd.variation.ADAMVariationContext
 
 object SomaticTrainableVariantCaller extends Command with Serializable with Logging {
   override val name = "somatic-trainable"
@@ -31,6 +33,10 @@ object SomaticTrainableVariantCaller extends Command with Serializable with Logg
       usage = "")
     var trainLociCalled: String = ""
 
+    @Opt(name = "-train-vcf", metaVar = "X",
+      usage = "")
+    var trainVCF: String = ""
+
     @Opt(name = "-train-num-iterations", metaVar = "X",
       usage = "")
     var trainNumIterations: Int = 100
@@ -38,6 +44,10 @@ object SomaticTrainableVariantCaller extends Command with Serializable with Logg
     @Opt(name = "-predict-model-input", metaVar = "X",
       usage = "")
     var predictModelInput: String = ""
+
+    @Opt(name = "-test-holdout-percent", metaVar = "X",
+      usage = "")
+    var testHoldOutPercent: Int = 0
   }
   type LocusLabel = (Long, Long)
 
@@ -71,11 +81,32 @@ object SomaticTrainableVariantCaller extends Command with Serializable with Logg
       (contigToNum.value(contig), locus)
     }
 
-    if (args.trainModelOutput.nonEmpty) {
+    def splitTrainingAndTest(reads: RDD[MappedRead]): (RDD[MappedRead], RDD[MappedRead]) = {
+      if (args.predictModelInput.nonEmpty) {
+        (reads, reads)
+      } else {
+        if (args.testHoldOutPercent > 0) {
+          // TODO: We are not actually splitting these into disjoint sets!
+          // There will be elements in both of these sets!
+          // When we upgrade to Spark 1.0, use reads.randomSplit here to fix this.
+          val training = reads.sample(false, (100 - args.testHoldOutPercent).toDouble / 100.0, 0)
+          val test = reads.sample(false, args.testHoldOutPercent.toDouble / 100.0, 0)
+          (training, test)
+        } else {
+          (reads, reads)
+        }
+      }
+    }
+    val (trainingTumorReads, testTumorReads) = splitTrainingAndTest(mappedTumorReads)
+    val (trainingNormalReads, testNormalReads) = splitTrainingAndTest(mappedNormalReads)
+  
+    val model = if (args.predictModelInput.nonEmpty) {
+      readModel(args)
+    } else {
       // Training.
-      val labels = getLabelsFromArgs(args, loci)
+      val labels = getLabelsFromArgs(args, sc, loci)
       val broadcastLabels = sc.broadcast(labels)
-      val features = getFeatures(args, lociPartitions, mappedTumorReads, mappedNormalReads, labelLocus)
+      val features = getFeatures(args, lociPartitions, trainingTumorReads, trainingNormalReads, labelLocus)
       val labeledFeatures = features.map({
         case ((contigNum, locus), features) => {
           val contig = numToContig.value(contigNum.toInt)
@@ -84,22 +115,16 @@ object SomaticTrainableVariantCaller extends Command with Serializable with Logg
         }
       })
       val model = LogisticRegressionWithSGD.train(labeledFeatures, args.trainNumIterations)
-      mappedTumorReads.unpersist()
-      mappedNormalReads.unpersist()
       Common.progress("Done training model.")
       Common.progress("Model: %s".format(model.toString))
+      model
+    }
+    // Write model if the user requested it.
+    maybeWriteModel(args, model)
 
-      // Write model
-      writeModel(args, model)
-    } else {
-      // Calling.
-      if (args.predictModelInput.isEmpty) {
-        throw new IllegalArgumentException("Either -predict-model-input or -train-model-output must be specified")
-      }
-
-      val model = readModel(args)
+    if (args.testHoldOutPercent > 0) {
       val dummyLabels = sc.broadcast(lociPartitions)
-      val features = getFeatures(args, lociPartitions, mappedTumorReads, mappedNormalReads, labelLocus).sortByKey()
+      val features = getFeatures(args, lociPartitions, testTumorReads, testNormalReads, labelLocus).sortByKey()
       val predictions = model.predict(features.map(pair => pair._2))
       val locusAndPredictions = features.map(pair => (pair._1)).zip(predictions)
       val called = locusAndPredictions.filter(pair => pair._2 > .5).map(_._1).collect
@@ -113,20 +138,23 @@ object SomaticTrainableVariantCaller extends Command with Serializable with Logg
       val calledLoci = calledBuiler.result
 
       Common.progress("Called %,d loci.".format(calledLoci.count))
-
       println(calledLoci.truncatedString(1000))
     }
     DelayedMessages.default.print()
   }
 
-  def writeModel(args: Arguments, model: LogisticRegressionModel) = {
-    val filesystem = FileSystem.get(new Configuration())
-    val path = new Path(args.trainModelOutput)
-    val writer = new BufferedWriter(new OutputStreamWriter(filesystem.create(path, true)))
-    writer.write("%f\n".format(model.intercept))
-    model.weights.foreach(weight => writer.write("%f\n".format(weight)))
-    writer.close()
-    Common.progress("Wrote: %s".format(args.trainModelOutput))
+  def maybeWriteModel(args: Arguments, model: LogisticRegressionModel) = {
+    if (args.trainModelOutput.isEmpty) {
+      Common.progress("Not writing model: no output file specified.")
+    } else {
+      val filesystem = FileSystem.get(new Configuration())
+      val path = new Path(args.trainModelOutput)
+      val writer = new BufferedWriter(new OutputStreamWriter(filesystem.create(path, true)))
+      writer.write("%f\n".format(model.intercept))
+      model.weights.foreach(weight => writer.write("%f\n".format(weight)))
+      writer.close()
+      Common.progress("Wrote: %s".format(args.trainModelOutput))
+    }
   }
 
   def readModel(args: Arguments): LogisticRegressionModel = {
@@ -145,14 +173,27 @@ object SomaticTrainableVariantCaller extends Command with Serializable with Logg
     new LogisticRegressionModel(weights.toArray, intercept)
   }
 
-  def getLabelsFromArgs(args: Arguments, allLoci: LociSet): LociMap[Long] = {
-    Common.progress("Building training labels.")
-    val calledLoci = LociSet.parse(args.trainLociCalled)
+  def getLabelsFromArgs(args: Arguments, sc: SparkContext, allLoci: LociSet): LociMap[Long] = {
+    val calledLoci: LociSet = if (args.trainVCF.nonEmpty) {
+      Common.progress("Loading training labels from VCF")
+      val variants = ADAMVariationContext.sparkContextToADAMVariationContext(sc).adamVCFLoad(args.trainVCF)
+      variants.mapPartitions(iterator => {
+        val builder = LociSet.newBuilder
+        iterator.foreach(context => {
+          val locus = context.position.pos
+          builder.put(context.position.referenceName, locus, locus + 1)
+        })
+        Iterator(builder.result)
+      }).reduce(_.union(_))
+    } else {
+      Common.progress("Parsing training labels.")
+      LociSet.parse(args.trainLociCalled)
+    }
     val builder = LociMap.newBuilder[Long]
     builder.put(allLoci, 0)
     builder.put(calledLoci, 1)
     val result = builder.result
-    Common.progress("Built training labels: %,d calls of %,d total loci".format(calledLoci.count, allLoci.count))
+    Common.progress("Loaded training labels: %,d calls of %,d total loci".format(calledLoci.count, allLoci.count))
     result
   }
 
