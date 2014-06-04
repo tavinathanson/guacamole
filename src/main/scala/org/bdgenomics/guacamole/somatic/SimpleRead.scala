@@ -24,12 +24,29 @@ import org.apache.spark.rdd.RDD
 import org.apache.hadoop.io.LongWritable
 import fi.tkk.ics.hadoop.bam.{ AnySAMInputFormat, SAMRecordWritable }
 import org.bdgenomics.guacamole.Common
+import org.apache.spark.broadcast.Broadcast
 
+/**
+ *
+ * @param baseSequence
+ * @param referenceContig Used to be string but this causes a lot of serialization overhead, so replaced with
+ *                        position of the contigName in the reference index's
+ *
+ * @param baseQualities
+ * @param alignmentQuality
+ * @param start
+ * @param end
+ * @param unclippedStart
+ * @param unclippedEnd
+ * @param cigar
+ * @param isMapped
+ * @param isDuplicate
+ */
 case class SimpleRead(
   baseSequence: Array[Byte],
-  referenceContig: String,
+  referenceContig: Int,
   baseQualities: Array[Byte],
-  alignmentQuality: Int,
+  alignmentQuality: Byte,
   start: Int,
   end: Int,
   unclippedStart: Int,
@@ -46,7 +63,7 @@ object SimpleRead {
    * @param record
    * @return
    */
-  def fromSAM(record: SAMRecord): SimpleRead = {
+  def fromSAM(record: SAMRecord, referenceIndex: Broadcast[Reference.Index]): SimpleRead = {
     val isMapped =
       record.getMappingQuality != SAMRecord.UNKNOWN_MAPPING_QUALITY &&
         record.getReferenceName != null &&
@@ -60,11 +77,13 @@ object SimpleRead {
     val unclippedStart = record.getUnclippedStart - 1
     val unclippedEnd = record.getUnclippedEnd - 1
     val cigar = record.getCigar
+    val contigName = Reference.normalizeContigName(record.getReferenceName)
+    val contigIndex: Int = referenceIndex.value.contigIndices(contigName)
     SimpleRead(
       baseSequence = record.getReadString.getBytes,
-      referenceContig = Reference.normalizeContigName(record.getReferenceName),
+      referenceContig = contigIndex,
       baseQualities = record.getBaseQualities,
-      alignmentQuality = record.getMappingQuality,
+      alignmentQuality = record.getMappingQuality.toByte,
       start = start,
       end = end,
       unclippedStart = unclippedStart,
@@ -79,20 +98,28 @@ object SimpleRead {
    *
    * @param filename name of file containing reads
    * @param sc spark context
+   * @param referenceIndex
    * @param mapped if true, will filter out non-mapped reads
    * @param nonDuplicate if true, will filter out duplicate reads.
    * @return
    */
   def loadFile(filename: String,
                sc: SparkContext,
+               referenceIndex: Reference.Index,
                mapped: Boolean = true,
                nonDuplicate: Boolean = true): RDD[SimpleRead] = {
     val samRecords: RDD[(LongWritable, SAMRecordWritable)] =
       sc.newAPIHadoopFile[LongWritable, SAMRecordWritable, AnySAMInputFormat](filename)
-    var reads: RDD[SimpleRead] = samRecords.map({ case (k, v) => fromSAM(v.get) })
-    if (mapped) reads = reads.filter(_.isMapped)
-    if (nonDuplicate) reads = reads.filter(read => !read.isDuplicate)
-    reads.persist()
+    val broadcastIndex = sc.broadcast(referenceIndex)
+    var reads: RDD[SimpleRead] = samRecords.flatMap({
+      case (k, v) =>
+        val read = fromSAM(v.get, broadcastIndex)
+        if ((!mapped || read.isMapped) && (!nonDuplicate || !read.isDuplicate)) {
+          Some(read)
+        } else {
+          None
+        }
+    })
     val description = (if (mapped) "mapped " else "") + (if (nonDuplicate) "non-duplicate" else "")
     Common.progress(
       "Loaded %,d %s reads into %,d partitions.".format(reads.count, description, reads.partitions.length))
