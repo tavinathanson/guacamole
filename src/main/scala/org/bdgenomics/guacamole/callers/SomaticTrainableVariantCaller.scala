@@ -74,16 +74,11 @@ object SomaticTrainableVariantCaller extends Command with Serializable with Logg
       "Tumor and normal samples have different sequence dictionaries. Tumor dictionary: %s.\nNormal dictionary: %s."
         .format(tumorDictionary, normalDictionary))
 
-    val mappedTumorReads = rawTumorReads.map(_.getMappedRead).filter(_.mdTag.isDefined)
-    val mappedNormalReads = rawNormalReads.map(_.getMappedRead).filter(_.mdTag.isDefined)
+    val reads = rawTumorReads.union(rawNormalReads).map(_.getMappedRead).filter(_.mdTag.isDefined)
+    reads.persist()
 
-    mappedTumorReads.persist()
-    mappedNormalReads.persist()
-
-    Common.progress("Loaded %,d tumor mapped non-duplicate MdTag-containing reads into %,d partitions.".format(
-      mappedTumorReads.count, mappedTumorReads.partitions.length))
-    Common.progress("Loaded %,d normal mapped non-duplicate MdTag-containing reads into %,d partitions.".format(
-      mappedNormalReads.count, mappedNormalReads.partitions.length))
+    Common.progress("Loaded %,d tumor/normal mapped non-duplicate MdTag-containing reads into %,d partitions.".format(
+      reads.count, reads.partitions.length))
 
     val loci = Common.loci(args, normalDictionary)
     val (trainingLoci, testLoci) = if (args.testHoldOutPercent > 0) {
@@ -112,19 +107,21 @@ object SomaticTrainableVariantCaller extends Command with Serializable with Logg
     val broadcastLabels = sc.broadcast(labels)
 
     def labelFeatures(features: RDD[(LocusLabel, Array[Double])]): RDD[LabeledPoint] = {
-      features.map({case ((contigNum, locus), features) => {
-        val contig = numToContig.value(contigNum.toInt)
-        val label = broadcastLabels.value.onContig(contig).get(locus).get.toDouble
-        LabeledPoint(label, features)
-      }})
+      features.map({
+        case ((contigNum, locus), features) => {
+          val contig = numToContig.value(contigNum.toInt)
+          val label = broadcastLabels.value.onContig(contig).get(locus).get.toDouble
+          LabeledPoint(label, features)
+        }
+      })
     }
 
     val model = if (args.predictModelInput.nonEmpty) {
       readModel(args)
     } else {
       // Training.
-      val lociPartitions = DistributedUtil.partitionLociAccordingToArgs(args, testLoci, mappedTumorReads, mappedNormalReads)
-      val features = getFeatures(args, lociPartitions, mappedTumorReads, mappedNormalReads, labelLocus)
+      val lociPartitions = DistributedUtil.partitionLociAccordingToArgs(args, testLoci, reads)
+      val features = getFeatures(args, lociPartitions, reads, labelLocus)
       val labeledFeatures = labelFeatures(features)
       val model = LogisticRegressionWithSGD.train(labeledFeatures, args.trainNumIterations)
       Common.progress("Done training model.")
@@ -136,13 +133,13 @@ object SomaticTrainableVariantCaller extends Command with Serializable with Logg
 
     if (args.test) {
       Common.progress("Testing.")
-      val lociPartitions = DistributedUtil.partitionLociAccordingToArgs(args, trainingLoci, mappedTumorReads, mappedNormalReads)
-      val features = getFeatures(args, lociPartitions, mappedTumorReads, mappedNormalReads, labelLocus).sortByKey()
+      val lociPartitions = DistributedUtil.partitionLociAccordingToArgs(args, trainingLoci, reads)
+      val features = getFeatures(args, lociPartitions, reads, labelLocus).sortByKey()
       val labeledFeatures = labelFeatures(features)
       val truthPredictionPairs = labeledFeatures.map(point => {
         (point.label > .5, model.predict(point.features) > .5)
       })
-      val counts = truthPredictionPairs.countByValue
+      val counts = truthPredictionPairs.countByValue.toMap.withDefaultValue(0L)
       def printCount(label: String, numerator: Long, denominator: Long) = {
         println("%s: %,d / %,d = %,2f%%".format(label, numerator, denominator, numerator * 100.0 / denominator))
       }
@@ -154,8 +151,8 @@ object SomaticTrainableVariantCaller extends Command with Serializable with Logg
 
     if (args.predict) {
       Common.progress("Predicting.")
-      val lociPartitions = DistributedUtil.partitionLociAccordingToArgs(args, loci, mappedTumorReads, mappedNormalReads)
-      val features = getFeatures(args, lociPartitions, mappedTumorReads, mappedNormalReads, labelLocus).sortByKey()
+      val lociPartitions = DistributedUtil.partitionLociAccordingToArgs(args, loci, reads)
+      val features = getFeatures(args, lociPartitions, reads, labelLocus).sortByKey()
       val locusAndPredictions = features.map(pair => (pair._1, model.predict(pair._2)))
       val called = locusAndPredictions.filter(pair => pair._2 > .5).map(_._1).collect
 
@@ -230,32 +227,40 @@ object SomaticTrainableVariantCaller extends Command with Serializable with Logg
   def getFeatures(
     args: Arguments,
     lociPartitions: LociMap[Long],
-    tumorReads: RDD[MappedRead],
-    normalReads: RDD[MappedRead],
+    reads: RDD[MappedRead],
     labeler: (String, Long) => LocusLabel): RDD[(LocusLabel, Array[Double])] = {
 
-    val pileupPoints: RDD[(LocusLabel, Array[Double])] = DistributedUtil.pileupFlatMapTwoRDDs[(LocusLabel, Array[Double])](
-      tumorReads,
-      normalReads,
+    val pileupPoints: RDD[(LocusLabel, Array[Double])] = DistributedUtil.pileupFlatMap[(LocusLabel, Array[Double])](
+      reads,
       lociPartitions,
-      (contig, locus, pileupTumor, pileupNormal) => {
+      (contig, locus, pileup) => {
+        val pileupTumor = pileup.byToken(1)
+        val pileupNormal = pileup.byToken(2)
         val locusLabel = labeler(contig, locus)
-        val features = pileupFeatures(pileupTumor, pileupNormal)
+        val features = PileupBasedFeatures.getAll(pileupTumor, pileupNormal)
         Iterator((locusLabel, features))
       })
     pileupPoints
   }
 
-  def pileupFeatures(pileupTumor: Pileup, pileupNormal: Pileup): Array[Double] = {
-    val result = new ArrayBuffer[Double]
+  object PileupBasedFeatures {
+    val features = Seq(
+      percentDifferences _)
 
-    // Feature: Percent differences in evidence for each base
-    val possibleAllelesTumor = SomaticThresholdVariantCaller.possibleSNVAllelePercents(pileupTumor)
-    val possibleAllelesNormal = SomaticThresholdVariantCaller.possibleSNVAllelePercents(pileupNormal)
-    val differences = Bases.standardBases.map(base => possibleAllelesTumor(base) - possibleAllelesNormal(base)).sorted
-    result ++= differences
+    def getAll(pileupTumor: Pileup, pileupNormal: Pileup): Array[Double] = {
+      val result = new ArrayBuffer[Double]
+      PileupBasedFeatures.features.foreach(feature => {
+        result ++= feature(pileupTumor, pileupNormal)
+      })
+      result.result.toArray
+    }
 
-    result.toArray
+    // Percent differences in evidence for each base
+    def percentDifferences(tumor: Pileup, normal: Pileup): Iterable[Double] = {
+      val possibleAllelesTumor = SomaticThresholdVariantCaller.possibleSNVAllelePercents(tumor)
+      val possibleAllelesNormal = SomaticThresholdVariantCaller.possibleSNVAllelePercents(normal)
+      Bases.standardBases.map(base => possibleAllelesTumor(base) - possibleAllelesNormal(base)).sorted
+    }
   }
 
 }
