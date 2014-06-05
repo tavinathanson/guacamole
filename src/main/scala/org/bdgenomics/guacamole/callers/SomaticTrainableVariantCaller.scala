@@ -140,6 +140,7 @@ object SomaticTrainableVariantCaller extends Command with Serializable with Logg
         (point.label > .5, model.predict(point.features) > .5)
       })
       val counts = truthPredictionPairs.countByValue.toMap.withDefaultValue(0L)
+      println("Counts: %s".format(counts.toString))
       def printCount(label: String, numerator: Long, denominator: Long) = {
         println("%s: %,d / %,d = %,2f%%".format(label, numerator, denominator, numerator * 100.0 / denominator))
       }
@@ -221,6 +222,7 @@ object SomaticTrainableVariantCaller extends Command with Serializable with Logg
     builder.put(calledLoci, 1)
     val result = builder.result
     Common.progress("Loaded training labels: %,d calls of %,d total loci".format(calledLoci.count, allLoci.count))
+    Common.progress("Training calls: %s".format(result.truncatedString(500)))
     result
   }
 
@@ -243,9 +245,22 @@ object SomaticTrainableVariantCaller extends Command with Serializable with Logg
     pileupPoints
   }
 
-  object PileupBasedFeatures {
-    val features = Seq(
-      percentDifferences _)
+
+
+  object FeatureGroups {
+    trait FeatureGroup {
+      val names: Seq[String]
+      val pileupBased: Boolean
+    }
+    trait PileupBasedFeatureGroup extends FeatureGroup {
+      val pileupBased = true
+      def apply(tumor: Pileup, normal: Pileup): Iterable[Double]
+      def compute(tumor: Pileup, normal: Pileup): Iterable[Double]
+    }
+
+
+    val groups = Seq(
+      PercentDifferences)
 
     def getAll(pileupTumor: Pileup, pileupNormal: Pileup): Array[Double] = {
       val result = new ArrayBuffer[Double]
@@ -255,12 +270,18 @@ object SomaticTrainableVariantCaller extends Command with Serializable with Logg
       result.result.toArray
     }
 
-    // Percent differences in evidence for each base
-    def percentDifferences(tumor: Pileup, normal: Pileup): Iterable[Double] = {
-      val possibleAllelesTumor = SomaticThresholdVariantCaller.possibleSNVAllelePercents(tumor)
-      val possibleAllelesNormal = SomaticThresholdVariantCaller.possibleSNVAllelePercents(normal)
-      Bases.standardBases.map(base => possibleAllelesTumor(base) - possibleAllelesNormal(base)).sorted
+    object PercentDifferences extends PileupBasedFeatureGroup {
+      val names = Bases.standardBases.map(base => "Base: %s".format(base.toString))
+
+      // Percent differences in evidence for each base
+      override def apply(tumor: Pileup, normal: Pileup): Iterable[Double] = {
+        val possibleAllelesTumor = SomaticThresholdVariantCaller.possibleSNVAllelePercents(tumor)
+        val possibleAllelesNormal = SomaticThresholdVariantCaller.possibleSNVAllelePercents(normal)
+        Bases.standardBases.map(base => possibleAllelesTumor(base) - possibleAllelesNormal(base)).sorted
+      }
     }
+
+
   }
 
 }
