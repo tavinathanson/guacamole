@@ -58,6 +58,10 @@ object SomaticTrainableVariantCaller extends Command with Serializable with Logg
     @Opt(name = "-predict",
       usage = "")
     var predict: Boolean = false
+
+    @Opt(name = "-verbose",
+      usage = "")
+    var verbose: Boolean = false
   }
   type LocusLabel = (Long, Long)
 
@@ -178,8 +182,18 @@ object SomaticTrainableVariantCaller extends Command with Serializable with Logg
       val filesystem = FileSystem.get(new Configuration())
       val path = new Path(args.trainModelOutput)
       val writer = new BufferedWriter(new OutputStreamWriter(filesystem.create(path, true)))
-      writer.write("%f\n".format(model.intercept))
-      model.weights.foreach(weight => writer.write("%f\n".format(weight)))
+      writer.write("# Intercept\n")
+      writer.write("%f\n\n".format(model.intercept))
+      val weights_iterator = model.weights.iterator
+      FeatureGroups.groups.foreach(group => {
+        writer.write("# %s\n".format(group.groupName))
+        group.names.foreach(name => {
+          writer.write("    # %s\n".format(name))
+          val weight = weights_iterator.next()
+          writer.write("    %f\n\n".format(weight))
+        })
+      })
+      assert(weights_iterator.isEmpty)
       writer.close()
       Common.progress("Wrote: %s".format(args.trainModelOutput))
     }
@@ -194,8 +208,10 @@ object SomaticTrainableVariantCaller extends Command with Serializable with Logg
     var line = reader.readLine()
     val weights = new ArrayBuffer[Double]
     while (line != null) {
-      val weight = line.toDouble
-      weights += weight
+      val stripped = line.stripMargin
+      if (stripped.nonEmpty && !stripped.startsWith("#")) {
+        weights += line.toDouble
+      }
     }
     Common.progress("Loaded model with %,d weights.".format(weights.length))
     new LogisticRegressionModel(weights.toArray, intercept)
@@ -239,48 +255,46 @@ object SomaticTrainableVariantCaller extends Command with Serializable with Logg
         val pileupTumor = pileup.byToken(1)
         val pileupNormal = pileup.byToken(2)
         val locusLabel = labeler(contig, locus)
-        val features = PileupBasedFeatures.getAll(pileupTumor, pileupNormal)
+        val features = FeatureGroups.pileupBased(pileupTumor, pileupNormal)
         Iterator((locusLabel, features))
       })
     pileupPoints
   }
 
-
-
   object FeatureGroups {
     trait FeatureGroup {
+      val groupName: String
       val names: Seq[String]
       val pileupBased: Boolean
     }
     trait PileupBasedFeatureGroup extends FeatureGroup {
       val pileupBased = true
-      def apply(tumor: Pileup, normal: Pileup): Iterable[Double]
-      def compute(tumor: Pileup, normal: Pileup): Iterable[Double]
+      def apply(tumor: Pileup, normal: Pileup): Seq[Double]
     }
 
-
-    val groups = Seq(
-      PercentDifferences)
-
-    def getAll(pileupTumor: Pileup, pileupNormal: Pileup): Array[Double] = {
+    def pileupBased(pileupTumor: Pileup, pileupNormal: Pileup): Array[Double] = {
       val result = new ArrayBuffer[Double]
-      PileupBasedFeatures.features.foreach(feature => {
-        result ++= feature(pileupTumor, pileupNormal)
+      groups.filter(_.pileupBased).foreach(feature => {
+        val additional = feature(pileupTumor, pileupNormal)
+        assert(additional.length == feature.names.length)
+        result ++= additional
       })
       result.result.toArray
     }
 
-    object PercentDifferences extends PileupBasedFeatureGroup {
-      val names = Bases.standardBases.map(base => "Base: %s".format(base.toString))
+    val groups = Seq(
+      PercentDifferences)
 
-      // Percent differences in evidence for each base
-      override def apply(tumor: Pileup, normal: Pileup): Iterable[Double] = {
+    // Percent differences in evidence for each base
+    object PercentDifferences extends PileupBasedFeatureGroup {
+      val groupName = "PercentDifferences"
+      val names = Bases.standardBases.map(base => "Base: %s".format(Bases.baseToString(base)))
+      override def apply(tumor: Pileup, normal: Pileup): Seq[Double] = {
         val possibleAllelesTumor = SomaticThresholdVariantCaller.possibleSNVAllelePercents(tumor)
         val possibleAllelesNormal = SomaticThresholdVariantCaller.possibleSNVAllelePercents(normal)
         Bases.standardBases.map(base => possibleAllelesTumor(base) - possibleAllelesNormal(base)).sorted
       }
     }
-
 
   }
 
