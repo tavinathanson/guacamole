@@ -19,6 +19,10 @@ import org.scalatest.matchers.ShouldMatchers
 
 object TestUtil extends ShouldMatchers {
 
+  // As a hack to run a single unit test, you can set this to the name of a test to run only it. See the top of
+  // DistributedUtilSuite for an example.
+  var runOnly: String = ""
+
   // Serialization helper functions.
   lazy val kryoPool = {
     val instantiator = new KryoInstantiator().setRegistrationRequired(true).withRegistrar(new IKryoRegistrar {
@@ -164,13 +168,15 @@ object TestUtil extends ShouldMatchers {
     }
 
     def sparkTest(name: String, silenceSpark: Boolean = true)(body: => Unit) {
-      test(name, SparkTest) {
-        sc = createSpark(name, silenceSpark)
-        try {
-          // Run the test
-          body
-        } finally {
-          destroySpark()
+      if (runOnly.isEmpty || runOnly == name) {
+        test(name, SparkTest) {
+          sc = createSpark(name, silenceSpark)
+          try {
+            // Run the test
+            body
+          } finally {
+            destroySpark()
+          }
         }
       }
     }

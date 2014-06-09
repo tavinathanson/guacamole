@@ -22,15 +22,9 @@ Run:
 ```
 scripts/guacamole threshold \
 	-reads src/test/resources/chrM.sorted.bam \
-	-out /tmp/OUT.gt.adam
-```
-
-You can then inspect the results, for example, using ADAM's summarize genotypes command:
+	-out /tmp/out.vcf
 
 ```
-adam summarize_genotypes /tmp/OUT.gt.adam
-```
-
 Try 
 ```
 scripts/guacamole -h

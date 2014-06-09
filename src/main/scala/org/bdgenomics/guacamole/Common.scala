@@ -49,14 +49,21 @@ object Common extends Logging {
       var loci: String = "all"
     }
 
+    /** Argument for using / not using sequence dictionaries to get contigs and lengths. */
+    trait NoSequenceDictionary extends Base {
+      @Opt(name = "-no-sequence-dictionary",
+        usage = "If set, get contigs and lengths directly from reads instead of from sequence dictionary.")
+      var noSequenceDictionary: Boolean = false
+    }
+
     /** Argument for accepting a single set of reads (for non-somatic variant calling). */
-    trait Reads extends Base {
+    trait Reads extends Base with NoSequenceDictionary {
       @Opt(name = "-reads", metaVar = "X", required = true, usage = "Aligned reads")
       var reads: String = ""
     }
 
     /** Arguments for accepting two sets of reads (tumor + normal). */
-    trait TumorNormalReads extends Base {
+    trait TumorNormalReads extends Base with NoSequenceDictionary {
       @Opt(name = "-normal-reads", metaVar = "X", required = true, usage = "Aligned reads: normal")
       var normalReads: String = ""
 
@@ -87,26 +94,6 @@ object Common extends Logging {
   }
 
   /**
-   * Given arguments for a single set of reads, and a spark context, return an RDD of reads.
-   *
-   * @param args parsed arguments
-   * @param sc spark context
-   * @param mapped if true (default), will filter out non-mapped reads
-   * @param nonDuplicate if true (default), will filter out duplicate reads.
-   * @return
-   */
-  def loadReadsFromArguments(
-    args: Arguments.Reads,
-    sc: SparkContext,
-    mapped: Boolean = true,
-    nonDuplicate: Boolean = true,
-    passedQualityChecks: Boolean = true): (RDD[Read], SequenceDictionary) = {
-
-    Read.loadReadRDDAndSequenceDictionaryFromBAM(
-      args.reads, sc, mapped = mapped, nonDuplicate = nonDuplicate, passedQualityChecks = passedQualityChecks)
-  }
-
-  /**
    *
    * Load genotypes from ADAM Parquet or VCF file
    *
@@ -123,40 +110,66 @@ object Common extends Logging {
   }
 
   /**
-   * Given arguments for two sets of reads (tumor and normal), return a 4-tuple of RDDs of reads and Sequence
-   * Dictionaries: (Tumor RDD, Tumor Sequence Dictionary, Normal RDD, Normal Sequence Dictionary).
+   * Given arguments for a single set of reads, and a spark context, return a ReadSet.
    *
    * @param args parsed arguments
    * @param sc spark context
-   * @param mapped if true, filter out non-mapped reads
-   * @param nonDuplicate if true, filter out duplicate reads.
+   * @param filters input filters to apply
+   * @return
+   */
+  def loadReadsFromArguments(
+    args: Arguments.Reads,
+    sc: SparkContext,
+    filters: Read.InputFilters): ReadSet = {
+    ReadSet(sc, args.reads, token = 0, filters = filters, contigLengthsFromDictionary = !args.noSequenceDictionary)
+  }
+
+  /**
+   * Given arguments for two sets of reads (tumor and normal), return a pair of (tumor, normal) read sets.
+   *
+   * The 'token' field will be set to 1 in the tumor reads, and 2 in the normal reads.
+   *
+   * @param args parsed arguments
+   * @param sc spark context
+   * @param filters input filters to apply
    */
   def loadTumorNormalReadsFromArguments(
     args: Arguments.TumorNormalReads,
     sc: SparkContext,
-    mapped: Boolean = true,
-    nonDuplicate: Boolean = true): (RDD[Read], SequenceDictionary, RDD[Read], SequenceDictionary) = {
-    val (tumorReads, tumorDictionary) = Read.loadReadRDDAndSequenceDictionaryFromBAM(
-      args.tumorReads, sc, token = 1, mapped = mapped, nonDuplicate = nonDuplicate)
-    val (normalReads, normalDictionary) = Read.loadReadRDDAndSequenceDictionaryFromBAM(
-      args.normalReads, sc, token = 2, mapped = mapped, nonDuplicate = nonDuplicate)
-    (tumorReads, tumorDictionary, normalReads, normalDictionary)
+    filters: Read.InputFilters): (ReadSet, ReadSet) = {
+
+    val tumor = ReadSet(sc, args.tumorReads, filters, 1, !args.noSequenceDictionary)
+    val normal = ReadSet(sc, args.normalReads, filters, 2, !args.noSequenceDictionary)
+    (tumor, normal)
   }
 
   /**
    * If the user specifies a -loci argument, parse it out and return the LociSet. Otherwise, construct a LociSet that
-   * includes all the loci spanned by the reads.
+   * includes all the loci in the contigs.
+   *
    * @param args parsed arguments
-   * @param sequenceDictionary Sequence Dictionary giving contig names and lengths.
+   * @param readSet readSet from which to use to get contigs and lengths.
    */
-  def loci(args: Arguments.Loci, sequenceDictionary: SequenceDictionary): LociSet = {
+  def loci(args: Arguments.Loci, readSet: ReadSet): LociSet = {
     val result = {
       if (args.loci == "all") {
         // Call at all loci.
-        getLociFromAllContigs(sequenceDictionary)
+        val builder = LociSet.newBuilder
+        readSet.contigLengths.foreach(pair => builder.put(pair._1, 0L, pair._2))
+        builder.result
       } else {
-        // Call at specified loci.
-        LociSet.parse(args.loci)
+        // Call at specified loci. Check that loci given are in the sequence dictionary.
+        val parsed = LociSet.parse(args.loci)
+
+        parsed.contigs.foreach(contig => {
+          assert(readSet.contigLengths.contains(contig),
+            "Specified contig '%s' is not found in the sequence dictionary.".format(contig))
+          val parsedMax = parsed.onContig(contig).ranges.map(_.end).max
+          assert(parsedMax <= readSet.contigLengths(contig),
+            "Contig %s in sequence dictionary has length %,d, but specified loci includes locus %,d.".format(
+              contig, readSet.contigLengths(contig), parsedMax - 1))
+        })
+        parsed
       }
     }
     progress("Including %,d loci across %,d contig(s): %s".format(
@@ -164,30 +177,6 @@ object Common extends Logging {
       result.contigs.length,
       result.truncatedString()))
     result
-  }
-
-  /**
-   * Collects the full set of loci (i.e. [0, length of contig]) on all contigs in the SequenceDictonary.
-   *
-   * @param sequenceDictionary ADAM sequence dictionary.
-   * @return LociSet of loci included in the sequence dictionary.
-   */
-  def getLociFromAllContigs(sequenceDictionary: SequenceDictionary): LociSet = {
-    val builder = LociSet.newBuilder
-    sequenceDictionary.records.foreach(record => {
-      builder.put(record.name.toString, 0L, record.length)
-    })
-    builder.result
-  }
-
-  def getLociFromReads(reads: RDD[MappedRead]): LociSet = {
-    val contigs = reads.map(read => Map(read.referenceContig -> read.end)).reduce((map1, map2) => {
-      val keys = map1.keySet.union(map2.keySet).toSeq
-      keys.map(key => key -> math.max(map1.getOrElse(key, 0L), map2.getOrElse(key, 0L))).toMap
-    })
-    val builder = LociSet.newBuilder
-    contigs.foreach(pair => builder.put(pair._1, 0L, pair._2))
-    builder.result
   }
 
   /**

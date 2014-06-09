@@ -12,7 +12,7 @@ import org.kohsuke.args4j.{ Option => Opt }
 import org.bdgenomics.guacamole.pileup.Pileup
 import scala.Some
 import org.apache.spark.serializer.JavaSerializer
-import scala.collection.mutable.{ HashMap => MutableHashMap }
+import scala.collection.mutable.{ HashMap => MutableHashMap, ArrayBuffer }
 
 object DistributedUtil extends Logging {
   trait Arguments extends Base with Loci {
@@ -29,10 +29,15 @@ object DistributedUtil extends Logging {
    */
   def partitionLociAccordingToArgs(args: Arguments, loci: LociSet, readsRDDs: RDD[MappedRead]*): LociMap[Long] = {
     val tasks = if (args.parallelism > 0) args.parallelism else readsRDDs(0).partitions.length
-    if (args.partitioningAccuracy == 0)
+    if (args.partitioningAccuracy == 0) {
       partitionLociUniformly(tasks, loci)
-    else
-      partitionLociByApproximateReadDepth(tasks, loci, args.partitioningAccuracy, readsRDDs: _*)
+    } else {
+      partitionLociByApproximateReadDepth(
+        tasks,
+        loci,
+        args.partitioningAccuracy,
+        readsRDDs: _*)
+    }
   }
 
   /**
@@ -55,17 +60,19 @@ object DistributedUtil extends Logging {
     var lociAssigned = 0L
     var task = 0L
     def remainingForThisTask = math.round(((task + 1) * lociPerTask) - lociAssigned).toLong
-    for (contig <- loci.contigs; range <- loci.onContig(contig).ranges) {
-      var start = range.start
-      val end = range.end
-      while (start < end) {
-        val length: Long = math.min(remainingForThisTask, end - start)
-        builder.put(contig, start, start + length, task)
-        start += length
-        lociAssigned += length
-        if (remainingForThisTask == 0) task += 1
-      }
-    }
+    loci.contigs.foreach(contig => {
+      loci.onContig(contig).ranges.foreach(range => {
+        var start = range.start
+        val end = range.end
+        while (start < end) {
+          val length: Long = math.min(remainingForThisTask, end - start)
+          builder.put(contig, start, start + length, task)
+          start += length
+          lociAssigned += length
+          if (remainingForThisTask == 0) task += 1
+        }
+      })
+    })
     val result = builder.result
     assert(lociAssigned == loci.count)
     assert(result.count == loci.count)
@@ -106,15 +113,27 @@ object DistributedUtil extends Logging {
    * @return LociMap of locus -> task assignments.
    */
   def partitionLociByApproximateReadDepth(tasks: Int, loci: LociSet, accuracy: Int, readRDDs: RDD[MappedRead]*): LociMap[Long] = {
+    val sc = readRDDs(0).sparkContext
+
+    // As an optimization for the case where some contigs have no reads.
+    val contigsWithReads = sc.union(readRDDs).map(_.referenceContig).distinct.collect.toSet
+    val contigsWithoutReads = loci.contigs.filter(!contigsWithReads.contains(_))
+    val lociUsed = if (contigsWithReads.nonEmpty) {
+      Common.progress(("Partitioning by read depth: skipping these contigs, since they have no reads: %s".format(
+        contigsWithReads.mkString(", "))))
+      loci.filterContigs(contigsWithReads.contains(_))
+    } else {
+      loci
+    }
+
     // Step (1). Split loci uniformly into micro partitions.
     assume(tasks >= 1)
-    assume(loci.count > 0)
+    assume(lociUsed.count > 0)
     assume(readRDDs.length > 0)
-    val numMicroPartitions: Int = if (accuracy * tasks < loci.count) accuracy * tasks else loci.count.toInt
+    val numMicroPartitions: Int = if (accuracy * tasks < lociUsed.count) accuracy * tasks else lociUsed.count.toInt
     progress("Splitting loci by read depth among %,d tasks using %,d micro partitions.".format(tasks, numMicroPartitions))
-    val microPartitions = partitionLociUniformly(numMicroPartitions, loci)
+    val microPartitions = partitionLociUniformly(numMicroPartitions, lociUsed)
     progress("Done calculating micro partitions.")
-    val sc = readRDDs(0).sparkContext
     val broadcastMicroPartitions = sc.broadcast(microPartitions)
 
     // Step (2)
@@ -157,11 +176,14 @@ object DistributedUtil extends Logging {
       .format(totalReads, readsPerTask))
     progress("Reads per micro partition: min=%,d mean=%,.0f max=%,d.".format(
       counts.min, counts.sum.toDouble / counts.length, counts.max))
+
     val builder = LociMap.newBuilder[Long]
+    builder.put(loci.filterContigs(contigsWithoutReads.contains(_)), 0) // Empty contigs get assigned to task 0.
     var readsAssigned = 0.0
     var task = 0L
     def readsRemainingForThisTask = math.round(((task + 1) * readsPerTask) - readsAssigned).toLong
-    for (microTask <- 0 until numMicroPartitions) {
+    var microTask = 0
+    while (microTask < numMicroPartitions) {
       var set = microPartitions.asInverseMap(microTask)
       var readsInSet = counts(microTask)
       while (!set.isEmpty) {
@@ -186,7 +208,7 @@ object DistributedUtil extends Logging {
           val fractionToTake = math.min(1.0, readsRemainingForThisTask.toDouble / readsInSet.toDouble)
 
           // Based on fractionToTake, we set the number of loci and reads to assign.
-          // We always take at least 1 locus to ensure we continue ot make progress.
+          // We always take at least 1 locus to ensure we continue to make progress.
           val lociToTake = math.max(1, (fractionToTake * set.count).toLong)
           val readsToTake = (fractionToTake * readsInSet).toLong
 
@@ -198,6 +220,7 @@ object DistributedUtil extends Logging {
           set = remainingSet
         }
       }
+      microTask += 1
     }
     val result = builder.result
     assert(result.count == loci.count)
@@ -207,11 +230,18 @@ object DistributedUtil extends Logging {
   /**
    * Flatmap across loci, where at each locus the provided function is passed a Pileup instance.
    *
-   * See [[windowTaskFlatMapMultipleRDDs()]] for argument descriptions.
+   * @param skipEmpty If true, the function will only be called at loci that have nonempty pileups, i.e. those
+   *                  where at least one read overlaps. If false, then the function will be called at all the
+   *                  specified loci. In cases where whole contigs may have no reads mapped (e.g. if running on
+   *                  only a single chromosome, but loading loci from a sequence dictionary that includes the
+   *                  entire genome), this is an important optimization.
+   *
+   * See [[windowTaskFlatMapMultipleRDDs()]] for other argument descriptions.
    *
    */
   def pileupFlatMap[T: ClassTag](reads: RDD[MappedRead],
                                  lociPartitions: LociMap[Long],
+                                 skipEmpty: Boolean,
                                  function: Pileup => Iterator[T]): RDD[T] = {
     windowTaskFlatMap(reads, lociPartitions, 0L, (task, taskLoci, taskReads) => {
       // The code here is running in parallel in each task.
@@ -224,13 +254,23 @@ object DistributedUtil extends Logging {
         case (contig, readsIterator) => {
           val window = SlidingReadWindow(0L, readsIterator)
           var maybePileup: Option[Pileup] = None
-          taskLoci.onContig(contig).individually.flatMap(locus => {
-            val newReads = window.setCurrentLocus(locus)
-            maybePileup = Some(maybePileup match {
-              case None         => Pileup(newReads, locus)
-              case Some(pileup) => pileup.atGreaterLocus(locus, newReads.iterator)
-            })
-            function(maybePileup.get)
+          taskLoci.onContig(contig).ranges.iterator.flatMap(range => {
+            if (skipEmpty && range.end < window.nextStartLocus.getOrElse(Long.MaxValue)) {
+              log.warn("Skipping entire contig: %s".format(contig))
+              Iterator.empty
+            } else {
+              (range.start until range.end).flatMap(locus => {
+                val newReads = window.setCurrentLocus(locus)
+                maybePileup = Some(maybePileup match {
+                  case None         => Pileup(newReads, locus)
+                  case Some(pileup) => pileup.atGreaterLocus(locus, newReads.iterator)
+                })
+                if (maybePileup.get.elements.nonEmpty || !skipEmpty)
+                  function(maybePileup.get)
+                else
+                  Iterator.empty
+              })
+            }
           })
         }
       })
@@ -241,12 +281,15 @@ object DistributedUtil extends Logging {
    * Flatmap across loci on two RDDs of MappedReads. At each locus the provided function is passed two Pileup instances,
    * giving the pileup for the reads in each RDD at that locus.
    *
-   * See [[windowTaskFlatMapMultipleRDDs()]] for argument descriptions.
+   * @param skipEmpty see [[pileupFlatMap]] for description.
+   *
+   * See [[windowTaskFlatMapMultipleRDDs()]] for other argument descriptions.
    *
    */
   def pileupFlatMapTwoRDDs[T: ClassTag](reads1: RDD[MappedRead],
                                         reads2: RDD[MappedRead],
                                         lociPartitions: LociMap[Long],
+                                        skipEmpty: Boolean,
                                         function: (Pileup, Pileup) => Iterator[T]): RDD[T] = {
     windowTaskFlatMapTwoRDDs(reads1, reads2, lociPartitions, 0L, (task, taskLoci, taskReads1, taskReads2) => {
       // The code here is running in parallel in each task.
@@ -256,7 +299,7 @@ object DistributedUtil extends Logging {
       val readsSplitByContig2 = splitReadsByContig(taskReads2, taskLoci.contigs)
 
       // Our result is the flatmap over both contigs and loci of the user function.
-      val contigs = readsSplitByContig1.keySet.union(readsSplitByContig2.keySet).toSeq.sorted
+      val contigs = readsSplitByContig1.keySet.union(readsSplitByContig2.keySet).filter(_.nonEmpty).toSeq.sorted
       contigs.iterator.flatMap(contig => {
         val readsIterator1 = readsSplitByContig1(contig)
         val readsIterator2 = readsSplitByContig2(contig)
@@ -264,18 +307,31 @@ object DistributedUtil extends Logging {
         val window2 = SlidingReadWindow(0L, readsIterator2)
         var maybePileup1: Option[Pileup] = None
         var maybePileup2: Option[Pileup] = None
-        taskLoci.onContig(contig).individually.flatMap(locus => {
-          val newReads1 = window1.setCurrentLocus(locus)
-          val newReads2 = window2.setCurrentLocus(locus)
-          maybePileup1 = Some(maybePileup1 match {
-            case None         => Pileup(newReads1, locus)
-            case Some(pileup) => pileup.atGreaterLocus(locus, newReads1.iterator)
-          })
-          maybePileup2 = Some(maybePileup2 match {
-            case None         => Pileup(newReads2, locus)
-            case Some(pileup) => pileup.atGreaterLocus(locus, newReads2.iterator)
-          })
-          function(maybePileup1.get, maybePileup2.get)
+        val lociRanges = taskLoci.onContig(contig).ranges.iterator
+        lociRanges.flatMap(range => {
+          val nextLocusWithReads = math.min(
+            window1.nextStartLocus.getOrElse(Long.MaxValue),
+            window2.nextStartLocus.getOrElse(Long.MaxValue))
+          if (skipEmpty && range.end < nextLocusWithReads) {
+            Iterator.empty // Skip this entire range, since we have no reads here.
+          } else {
+            (range.start until range.end).flatMap(locus => {
+              val newReads1 = window1.setCurrentLocus(locus)
+              val newReads2 = window2.setCurrentLocus(locus)
+              maybePileup1 = Some(maybePileup1 match {
+                case None         => Pileup(newReads1, locus)
+                case Some(pileup) => pileup.atGreaterLocus(locus, newReads1.iterator)
+              })
+              maybePileup2 = Some(maybePileup2 match {
+                case None         => Pileup(newReads2, locus)
+                case Some(pileup) => pileup.atGreaterLocus(locus, newReads2.iterator)
+              })
+              if (maybePileup1.get.elements.nonEmpty || maybePileup2.get.elements.nonEmpty || !skipEmpty)
+                function(maybePileup1.get, maybePileup2.get)
+              else
+                Iterator.empty
+            })
+          }
         })
       })
     })

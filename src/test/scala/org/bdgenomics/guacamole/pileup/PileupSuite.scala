@@ -31,7 +31,7 @@ class PileupSuite extends TestUtil.SparkFunSuite with ShouldMatchers {
     val path = ClassLoader.getSystemClassLoader.getResource(filename).getFile
     assert(sc != null)
     assert(sc.hadoopConfiguration != null)
-    val (reads, sequenceDictionary) = Read.loadReadRDDAndSequenceDictionaryFromBAM(path, sc, mapped = true)
+    val (reads, sequenceDictionary) = Read.loadReadRDDAndSequenceDictionaryFromBAM(path, sc, filters = Read.InputFilters(mapped = true))
     reads.map(_.getMappedRead)
   }
 
@@ -44,7 +44,7 @@ class PileupSuite extends TestUtil.SparkFunSuite with ShouldMatchers {
     Pileup(localReads, locus)
   }
 
-  test("create pileup from long insert reads") {
+  sparkTest("create pileup from long insert reads") {
     val reads = Seq(
       TestUtil.makeRead("TCGATCGA", "8M", "8", 1),
       TestUtil.makeRead("TCGATCGA", "8M", "8", 1),
@@ -69,7 +69,7 @@ class PileupSuite extends TestUtil.SparkFunSuite with ShouldMatchers {
       }) should be(true)
   }
 
-  test("create pileup from long insert reads; different qualities in insertion") {
+  sparkTest("create pileup from long insert reads; different qualities in insertion") {
     val reads = Seq(
       TestUtil.makeRead("TCGATCGA", "8M", "8", 1, "chr1", Some(Array(10, 15, 20, 25, 10, 15, 20, 25))),
       TestUtil.makeRead("TCGATCGA", "8M", "8", 1, "chr1", Some(Array(10, 15, 20, 25, 10, 15, 20, 25))),
@@ -87,7 +87,7 @@ class PileupSuite extends TestUtil.SparkFunSuite with ShouldMatchers {
       }) should be(true)
   }
 
-  test("create pileup from long insert reads; right after insertion") {
+  sparkTest("create pileup from long insert reads; right after insertion") {
     val reads = Seq(
       TestUtil.makeRead("TCGATCGA", "8M", "8", 1, "chr1", Some(Array(10, 15, 20, 25, 10, 15, 20, 25))),
       TestUtil.makeRead("TCGATCGA", "8M", "8", 1, "chr1", Some(Array(10, 15, 20, 25, 10, 15, 20, 25))),
@@ -103,7 +103,7 @@ class PileupSuite extends TestUtil.SparkFunSuite with ShouldMatchers {
 
   }
 
-  test("create pileup from long insert reads; after insertion") {
+  sparkTest("create pileup from long insert reads; after insertion") {
     val reads = Seq(
       TestUtil.makeRead("TCGATCGA", "8M", "8", 1),
       TestUtil.makeRead("TCGATCGA", "8M", "8", 1),
@@ -114,7 +114,7 @@ class PileupSuite extends TestUtil.SparkFunSuite with ShouldMatchers {
     lastPileup.elements.forall(_.isMatch) should be(true)
   }
 
-  test("create pileup from long insert reads; end of read") {
+  sparkTest("create pileup from long insert reads; end of read") {
 
     val reads = Seq(
       TestUtil.makeRead("TCGATCGA", "8M", "8", 1, "chr1", Some(Array(10, 15, 20, 25, 10, 15, 20, 25))),
@@ -142,7 +142,7 @@ class PileupSuite extends TestUtil.SparkFunSuite with ShouldMatchers {
     }
   }
 
-  test("test pileup element creation") {
+  sparkTest("test pileup element creation") {
     val read = TestUtil.makeRead("AATTG", "5M", "5", 0, "chr1")
     val firstElement = PileupElement(read, 0)
 
@@ -162,7 +162,7 @@ class PileupSuite extends TestUtil.SparkFunSuite with ShouldMatchers {
 
   }
 
-  test("test pileup element creation with multiple cigar elements") {
+  sparkTest("test pileup element creation with multiple cigar elements") {
     val read = TestUtil.makeRead("AAATTT", "3M3M", "6", 0, "chr1")
 
     val secondMatch = PileupElement(read, 3)
@@ -177,7 +177,7 @@ class PileupSuite extends TestUtil.SparkFunSuite with ShouldMatchers {
 
   }
 
-  test("test pileup element creation with deletion cigar elements") {
+  sparkTest("test pileup element creation with deletion cigar elements") {
     val read = TestUtil.makeRead("AATTGAATTG", "5M1D5M", "5^C5", 0, "chr1")
     val firstElement = PileupElement(read, 0)
 
@@ -286,7 +286,7 @@ class PileupSuite extends TestUtil.SparkFunSuite with ShouldMatchers {
     assert(Bases.equalString(read3At15.elementAtGreaterLocus(18).sequencedBases, "G"))
   }
 
-  test("Read4 has CIGAR: 10M10I10D40M; ACGT repeated 15 times") {
+  sparkTest("Read4 has CIGAR: 10M10I10D40M; ACGT repeated 15 times") {
     // Read4 has CIGAR: 10M10I10D40M
     // It's ACGT repeated 15 times
     val decadentRead4 = testAdamRecords(3)
@@ -300,7 +300,7 @@ class PileupSuite extends TestUtil.SparkFunSuite with ShouldMatchers {
     }
   }
 
-  test("Read5: ACGTACGTACGTACG, 5M4=1X5=") {
+  sparkTest("Read5: ACGTACGTACGTACG, 5M4=1X5=") {
 
     // Read5: ACGTACGTACGTACG, 5M4=1X5=, [10; 25[
     //        MMMMM====G=====
@@ -317,7 +317,7 @@ class PileupSuite extends TestUtil.SparkFunSuite with ShouldMatchers {
     assert(Bases.basesToString(read5At10.elementAtGreaterLocus(24).sequencedBases) === "G")
   }
 
-  test("read6: ACGTACGTACGT 4=1N4=4S") {
+  sparkTest("read6: ACGTACGTACGT 4=1N4=4S") {
     // Read6: ACGTACGTACGT 4=1N4=4S
     // one `N` and soft-clipping at the end
     val decadentRead6 = testAdamRecords(5)
@@ -335,7 +335,7 @@ class PileupSuite extends TestUtil.SparkFunSuite with ShouldMatchers {
     }
   }
 
-  test("read7: ACGTACGT 4=1N4=4H, one `N` and hard-clipping at the end") {
+  sparkTest("read7: ACGTACGT 4=1N4=4H, one `N` and hard-clipping at the end") {
     val decadentRead7 = testAdamRecords(6)
     val read7At40 = PileupElement(decadentRead7, 40)
     assert(read7At40 != null)
@@ -351,7 +351,7 @@ class PileupSuite extends TestUtil.SparkFunSuite with ShouldMatchers {
     }
   }
 
-  test("Read8: ACGTACGT 4=1P4=") {
+  sparkTest("Read8: ACGTACGT 4=1P4=") {
 
     // Read8: ACGTACGT 4=1P4=
     // one `P`, a silent deletion (i.e. a deletion from a reference with a
